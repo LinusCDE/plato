@@ -28,7 +28,7 @@ pub struct RemarkableFramebuffer {
 impl RemarkableFramebuffer {
     pub fn new(fb_device_path: &'static str) -> Result<RemarkableFramebuffer, Error> {
         Ok(RemarkableFramebuffer {
-            fb: libremarkable::framebuffer::core::Framebuffer::new(fb_device_path),
+            fb: libremarkable::framebuffer::core::Framebuffer::from_path(fb_device_path),
             monochrome: false,
             inverted: false,
             refresh_quality: Default::default()

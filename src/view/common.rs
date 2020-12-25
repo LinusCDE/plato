@@ -10,6 +10,7 @@ use super::menu::{Menu, MenuKind};
 use super::notification::Notification;
 use crate::app::Context;
 use super::RefreshQuality;
+use libremarkable::device::{CURRENT_DEVICE as CURRENT_LIBREMARKABLE_DEVICE, Model};
 
 pub fn shift(view: &mut dyn View, delta: Point) {
     *view.rect_mut() += delta;
@@ -75,11 +76,15 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
         }
 
         let rotation = CURRENT_DEVICE.to_canonical(context.display.rotation);
-        let rotate = (0..4).map(|n|
+        let mut rotate = (0..4).map(|n|
             EntryKind::RadioButton((n as i16 * 90).to_string(),
                                    EntryId::Rotate(CURRENT_DEVICE.from_canonical(n)),
                                    n == rotation)
         ).collect::<Vec<EntryKind>>();
+        if CURRENT_LIBREMARKABLE_DEVICE.model == Model::Gen2 {
+            rotate.push(EntryKind::Separator);
+            rotate.push(EntryKind::Message("Will most likely not work on rM2!".to_owned()));
+        }
 
         let apps = vec![EntryKind::Command("Dictionary".to_string(),
                                            EntryId::Launch(AppCmd::Dictionary { query: "".to_string(), language: "".to_string() })),
@@ -87,8 +92,8 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                            EntryId::Launch(AppCmd::Calculator)),
                         EntryKind::Command("Sketch".to_string(),
                                            EntryId::Launch(AppCmd::Sketch))];
-        
-        let refresh_qualities = vec![EntryKind::RadioButton("Fast".to_string(),
+
+        let mut refresh_qualities = vec![EntryKind::RadioButton("Fast".to_string(),
                                            EntryId::RefreshQuality(RefreshQuality::Fast),
                                            context.settings.remarkable.refresh_quality == RefreshQuality::Fast),
                                      EntryKind::RadioButton("Normal".to_string(),
@@ -101,7 +106,11 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                            EntryId::RefreshQuality(RefreshQuality::Perfect),
                                            context.settings.remarkable.refresh_quality == RefreshQuality::Perfect),
                                     ];
-        
+        if CURRENT_LIBREMARKABLE_DEVICE.model == Model::Gen2 {
+            refresh_qualities.push(EntryKind::Separator);
+            refresh_qualities.push(EntryKind::Message("Will most likely not work on rM2!".to_owned()));
+        }
+
         let input_sources = vec![EntryKind::CheckBox("Touch".to_string(),
                                       EntryId::ToggleInputSource(InputSource::Touch),
                                       context.settings.remarkable.input_sources.contains(&InputSource::Touch)),
@@ -135,7 +144,7 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
             entries.push(EntryKind::Command("Reboot in Nickel".to_string(), EntryId::RebootInNickel));
             entries.push(EntryKind::Command("Reboot".to_string(), EntryId::Reboot));
         } else {
-            
+
             let system_entries = vec![
                 EntryKind::Command("Power off".to_string(), EntryId::PowerOff),
                 EntryKind::Command("Reboot".to_string(), EntryId::Reboot),

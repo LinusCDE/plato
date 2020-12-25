@@ -2,6 +2,7 @@ use std::env;
 use std::fmt;
 use lazy_static::lazy_static;
 use crate::input::TouchProto;
+use std::fmt::Display;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Model {
@@ -55,7 +56,7 @@ impl fmt::Display for Model {
             Model::Glo           => write!(f, "Glo"),
             Model::TouchC        => write!(f, "Touch C"),
             Model::TouchAB       => write!(f, "Touch A/B"),
-            Model::Remarkable    => write!(f, "reMarkable Gen 1"),
+            Model::Remarkable    => libremarkable::device::CURRENT_DEVICE.model.fmt(f), // Can be Gen 1 or Gen 2
         }
     }
 }

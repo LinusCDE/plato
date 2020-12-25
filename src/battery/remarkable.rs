@@ -1,10 +1,8 @@
-use std::io::{Read, Seek, SeekFrom};
-use std::fs::File;
-use std::path::Path;
 use super::{Battery, Status};
-use anyhow::{Error, format_err};
-
-const BATTERY_INTERFACE: &str = "/sys/class/power_supply/bq27441-0";
+use anyhow::{format_err, Error};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::PathBuf;
 
 const BATTERY_CAPACITY: &str = "capacity";
 const BATTERY_STATUS: &str = "status";
@@ -17,7 +15,10 @@ pub struct RemarkableBattery {
 
 impl RemarkableBattery {
     pub fn new() -> Result<RemarkableBattery, Error> {
-        let base = Path::new(BATTERY_INTERFACE);
+        let base = PathBuf::from(format!(
+            "/sys/class/power_supply/{}",
+            libremarkable::device::CURRENT_DEVICE.get_internal_battery_name()
+        ));
         let capacity = File::open(base.join(BATTERY_CAPACITY))?;
         let status = File::open(base.join(BATTERY_STATUS))?;
         Ok(RemarkableBattery { capacity, status })
@@ -41,7 +42,6 @@ impl Battery for RemarkableBattery {
             "Charging" => Ok(Status::Charging),
             "Not charging" | "Full" => Ok(Status::Charged),
             _ => Err(format_err!("Unknown battery status.")),
-
         }
     }
 }

@@ -1,5 +1,5 @@
 [![rm1](https://img.shields.io/badge/rM1-supported-green)](https://remarkable.com/store/remarkable)
-[![rm2](https://img.shields.io/badge/rM2-unsupported-red)](https://remarkable.com/store/remarkable-2)
+[![rm2](https://img.shields.io/badge/rM2-needs_shim_or_launcher-yellow)](https://remarkable.com/store/remarkable-2)
 [![opkg](https://img.shields.io/badge/OPKG-plato-blue)](https://github.com/matteodelabre/toltec)
 [![launchers](https://img.shields.io/badge/Launchers-supported-green)](https://github.com/reHackable/awesome-reMarkable#launchers)
 
@@ -40,6 +40,10 @@ Documentation: [GUIDE](doc/GUIDE.md), [MANUAL](doc/MANUAL.md) and [BUILD](doc/BU
 ## reMarkable 2 support
 
 As of now the software will not work at all on the reMarkable 2. It will need some adjustments to recognize the new model but also rely on people figuring out the framebuffer and updating libremarkable to use it. As soon as libremarkable supports the new framebuffer, I should be able to get this to work on it as well.
+
+Plato supports the input and battery of the reMarkable 2 natively but now the framebuffer. For that [this shim](https://github.com/ddvk/remarkable2-framebuffer/) has to be used (or you won't get an image). Luckily current launchers support automaticially launching apps through the shim. So if you use a launcher (oxide or remux) anyways, it should just work.
+
+As mentioned though, since the framebuffer uses a shim, specific features like "Rotate" and "Refresh Quality" will most likely do nothing.
 
 ## Supported firmwares
 

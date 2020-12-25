@@ -55,7 +55,6 @@ fxhash = "0.2.1"
 rand_core = "0.5.1"
 rand_xoshiro = "0.4.0"
 mmap = "0.1.1"
-clap = "3.0.0-beta.1"
 
 [dependencies.getopts]
 version = "0.2.21"

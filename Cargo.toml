@@ -55,6 +55,7 @@ fxhash = "0.2.1"
 rand_core = "0.5.1"
 rand_xoshiro = "0.4.0"
 mmap = "0.1.1"
+libremarkable = "0.4.3"
 
 [dependencies.getopts]
 version = "0.2.21"
@@ -81,10 +82,6 @@ optional = true
 [dependencies.signal-hook]
 version = "0.1.16"
 optional = true
-
-[dependencies.libremarkable]
-git = "https://github.com/LinusCDE/libremarkable.git"
-rev = "eb272cb0da1bf9a8fb7ac5f00abd7840e47d7ef6"
 
 [features]
 importer = ["getopts"]

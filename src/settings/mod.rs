@@ -82,8 +82,8 @@ pub enum InputSource {
 impl InputSource {
     pub fn to_path(&self) -> &str {
         match self {
-            InputSource::Pen => EVENT_WACOM,
-            InputSource::Touch => EVENT_TOUCH_SCREEN,
+            InputSource::Pen => &EVENT_WACOM,
+            InputSource::Touch => &EVENT_TOUCH_SCREEN,
         }
     }
 

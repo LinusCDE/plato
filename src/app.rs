@@ -48,9 +48,11 @@ use crate::rtc::Rtc;
 pub const APP_NAME: &str = "Plato";
 const FB_DEVICE: &str = "/dev/fb0";
 const RTC_DEVICE: &str = "/dev/rtc0";
-const EVENT_BUTTONS: &str = "/dev/input/event2"; // reMarkable gpio-keys
-pub const EVENT_TOUCH_SCREEN: &str = "/dev/input/event1"; // reMarkable cyttsp5_mt (Multitouch)
-pub const EVENT_WACOM: &str = "/dev/input/event0"; // reMarkable Wacom I2C Digitizer (Pen input)
+lazy_static! {
+    pub static ref EVENT_BUTTONS: String = libremarkable::input::scan::SCANNED.gpio_path.to_str().unwrap().to_owned();
+    pub static ref EVENT_TOUCH_SCREEN: String = libremarkable::input::scan::SCANNED.multitouch_path.to_str().unwrap().to_owned();
+    pub static ref EVENT_WACOM: String = libremarkable::input::scan::SCANNED.wacom_path.to_str().unwrap().to_owned();
+}
 const KOBO_UPDATE_BUNDLE: &str = "/mnt/onboard/.kobo/KoboRoot.tgz";
 const KEYBOARD_LAYOUTS_DIRNAME: &str = "keyboard-layouts";
 const DICTIONARIES_DIRNAME: &str = "dictionaries";

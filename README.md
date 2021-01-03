@@ -39,9 +39,7 @@ Documentation: [GUIDE](doc/GUIDE.md), [MANUAL](doc/MANUAL.md) and [BUILD](doc/BU
 
 ## reMarkable 2 support
 
-As of now the software will not work at all on the reMarkable 2. It will need some adjustments to recognize the new model but also rely on people figuring out the framebuffer and updating libremarkable to use it. As soon as libremarkable supports the new framebuffer, I should be able to get this to work on it as well.
-
-Plato supports the input and battery of the reMarkable 2 natively but now the framebuffer. For that [this shim](https://github.com/ddvk/remarkable2-framebuffer/) has to be used (or you won't get an image). Luckily current launchers support automaticially launching apps through the shim. So if you use a launcher (oxide or remux) anyways, it should just work.
+Plato supports the input and battery of the reMarkable 2 natively but not the framebuffer. For that [this shim](https://github.com/ddvk/remarkable2-framebuffer/) has to be used (or you won't get an image). Luckily current launchers support automaticially launching apps through the shim. So if you use a launcher (oxide or remux) anyways, it should just work.
 
 As mentioned though, since the framebuffer uses a shim, specific features like "Rotate" and "Refresh Quality" will most likely do nothing.
 

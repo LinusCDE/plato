@@ -130,6 +130,8 @@ pub struct Settings {
     pub auto_suspend: u8,
     pub auto_power_off: u8,
     pub remarkable: RemarkableSettings,
+    pub time_format: String,
+    pub date_format: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<LibrarySettings>,
     #[serde(skip_serializing_if = "FxHashMap::is_empty")]
@@ -162,6 +164,7 @@ pub struct LibrarySettings {
     pub sort_method: SortMethod,
     pub first_column: FirstColumn,
     pub second_column: SecondColumn,
+    pub thumbnail_previews: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hooks: Vec<Hook>,
 }
@@ -176,6 +179,7 @@ impl Default for LibrarySettings {
             sort_method: SortMethod::Opened,
             first_column: FirstColumn::TitleAndAuthor,
             second_column: SecondColumn::Progress,
+            thumbnail_previews: true,
             hooks: Vec::new(),
         }
     }
@@ -186,7 +190,6 @@ impl Default for LibrarySettings {
 pub struct ImportSettings {
     pub unshare_trigger: bool,
     pub startup_trigger: bool,
-    pub traverse_hidden: bool,
     pub extract_epub_metadata: bool,
     pub allowed_kinds: FxHashSet<String>,
 }
@@ -293,7 +296,7 @@ pub enum SecondColumn {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Hook {
     pub path: PathBuf,
-    pub program: Option<PathBuf>,
+    pub program: PathBuf,
     pub sort_method: Option<SortMethod>,
     pub first_column: Option<FirstColumn>,
     pub second_column: Option<SecondColumn>,
@@ -303,7 +306,7 @@ impl Default for Hook {
     fn default() -> Self {
         Hook {
             path: PathBuf::default(),
-            program: None,
+            program: PathBuf::default(),
             sort_method: None,
             first_column: None,
             second_column: None,
@@ -317,6 +320,7 @@ pub struct HomeSettings {
     pub address_bar: bool,
     pub navigation_bar: bool,
     pub max_levels: usize,
+    pub max_trash_size: u64,
 }
 
 
@@ -331,6 +335,9 @@ pub struct RefreshRateSettings {
 #[serde(default, rename_all = "kebab-case")]
 pub struct ReaderSettings {
     pub finished: FinishedAction,
+    pub south_east_corner: SouthEastCornerAction,
+    pub strip_width: f32,
+    pub corner_width: f32,
     pub font_path: String,
     pub font_family: String,
     pub font_size: f32,
@@ -354,6 +361,13 @@ pub enum FinishedAction {
     Close,
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SouthEastCornerAction {
+    NextPage,
+    GoToPage,
+}
+
 impl Default for RefreshRateSettings {
     fn default() -> Self {
         RefreshRateSettings {
@@ -367,8 +381,9 @@ impl Default for HomeSettings {
     fn default() -> Self {
         HomeSettings {
             address_bar: false,
-            navigation_bar: false,
+            navigation_bar: true,
             max_levels: 3,
+            max_trash_size: 32 * (1 << 20),
         }
     }
 }
@@ -376,14 +391,17 @@ impl Default for HomeSettings {
 impl Default for ReaderSettings {
     fn default() -> Self {
         ReaderSettings {
-            refresh_rate: RefreshRateSettings::default(),
             finished: FinishedAction::Notify,
+            south_east_corner: SouthEastCornerAction::GoToPage,
+            strip_width: 0.6,
+            corner_width: 0.4,
             font_path: DEFAULT_FONT_PATH.to_string(),
             font_family: DEFAULT_FONT_FAMILY.to_string(),
             font_size: DEFAULT_FONT_SIZE,
             text_align: DEFAULT_TEXT_ALIGN,
             margin_width: DEFAULT_MARGIN_WIDTH,
             line_height: DEFAULT_LINE_HEIGHT,
+            refresh_rate: RefreshRateSettings::default(),
         }
     }
 }
@@ -393,10 +411,10 @@ impl Default for ImportSettings {
         ImportSettings {
             unshare_trigger: true,
             startup_trigger: true,
-            traverse_hidden: false,
             extract_epub_metadata: true,
-            allowed_kinds: ["pdf", "djvu", "epub",
-                            "fb2", "xps", "oxps", "cbz"].iter().map(|k| k.to_string()).collect(),
+            allowed_kinds: ["pdf", "djvu", "epub", "fb2",
+                            "xps", "oxps", "html", "htm",
+                            "cbz", "png", "jpg", "jpeg"].iter().map(|k| k.to_string()).collect(),
         }
     }
 }
@@ -418,6 +436,15 @@ impl Default for Settings {
                 LibrarySettings {
                     name: "Media".to_string(),
                     path: PathBuf::from("media"),
+                    hooks: vec![
+                        Hook {
+                            path: PathBuf::from("Articles"),
+                            program: PathBuf::from("bin/article_fetcher/article_fetcher"),
+                            sort_method: Some(SortMethod::Added),
+                            first_column: Some(FirstColumn::TitleAndAuthor),
+                            second_column: Some(SecondColumn::Progress),
+                        }
+                    ],
                     .. Default::default()
                 },
             ],
@@ -430,6 +457,8 @@ impl Default for Settings {
             button_scheme: ButtonScheme::Natural,
             auto_suspend: 30,
             auto_power_off: 3,
+            time_format: "%H:%M".to_string(),
+            date_format: "%A, %B %-d, %Y".to_string(),
             intermission_images: FxHashMap::default(),
             home: HomeSettings::default(),
             reader: ReaderSettings::default(),

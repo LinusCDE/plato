@@ -1,14 +1,14 @@
 use std::fs::{self, File};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 use std::path::{PathBuf, Path};
 use std::collections::BTreeSet;
-use regex::Regex;
 use walkdir::WalkDir;
 use indexmap::IndexMap;
 use fxhash::{FxHashMap, FxHashSet, FxBuildHasher};
 use chrono::{Local, TimeZone};
 use filetime::{FileTime, set_file_handle_times};
-use crate::metadata::{Info, ReaderInfo, FileInfo, SimpleStatus, SortMethod};
+use anyhow::{Error, format_err};
+use crate::metadata::{Info, ReaderInfo, FileInfo, BookQuery, SimpleStatus, SortMethod};
 use crate::metadata::{sort, sorter, extract_metadata_from_epub};
 use crate::settings::{LibraryMode, ImportSettings};
 use crate::document::file_kind;
@@ -17,6 +17,7 @@ use crate::helpers::{Fingerprint, save_json, load_json, IsHidden};
 pub const METADATA_FILENAME: &str = ".metadata.json";
 pub const FAT32_EPOCH_FILENAME: &str = ".fat32-epoch";
 pub const READING_STATES_DIRNAME: &str = ".reading-states";
+pub const THUMBNAIL_PREVIEWS_DIRNAME: &str = ".thumbnail-previews";
 
 pub struct Library {
     pub home: PathBuf,
@@ -75,6 +76,11 @@ impl Library {
             }
         }
 
+        let path = home.as_ref().join(THUMBNAIL_PREVIEWS_DIRNAME);
+        if !path.exists() {
+            fs::create_dir(&path).ok();
+        }
+
         let paths = if mode == LibraryMode::Database {
             db.iter().map(|(fp, info)| (info.file.path.clone(), *fp)).collect()
         } else {
@@ -108,7 +114,7 @@ impl Library {
         }
     }
 
-    pub fn list<P: AsRef<Path>>(&self, prefix: P, query: Option<&Regex>, skip_files: bool) -> (Vec<Info>, BTreeSet<PathBuf>) {
+    pub fn list<P: AsRef<Path>>(&self, prefix: P, query: Option<&BookQuery>, skip_files: bool) -> (Vec<Info>, BTreeSet<PathBuf>) {
         let mut dirs = BTreeSet::new();
         let mut files = Vec::new();
 
@@ -130,14 +136,7 @@ impl Library {
                         if skip_files {
                             continue;
                         }
-                        if query.map_or(true, |q| {
-                            q.is_match(&info.title) ||
-                            q.is_match(&info.subtitle) ||
-                            q.is_match(&info.author) ||
-                            q.is_match(&info.series) ||
-                            info.file.path.to_str()
-                                .map_or(false, |s| q.is_match(s))
-                        }) {
+                        if query.map_or(true, |q| q.is_match(info)) {
                             files.push(info.clone());
                         }
                     }
@@ -173,7 +172,7 @@ impl Library {
                         let relat = path.strip_prefix(&self.home)
                                         .unwrap_or_else(|_| path.as_ref());
                         if skip_files || query.map_or(false, |q| {
-                            relat.to_str().map_or(true, |s| !q.is_match(s))
+                            relat.to_str().map_or(true, |s| !q.is_simple_match(s))
                         }) {
                             continue;
                         }
@@ -215,7 +214,7 @@ impl Library {
 
         for entry in WalkDir::new(prefix.as_ref()).min_depth(1)
                              .into_iter()
-                             .filter_entry(|e| settings.traverse_hidden || !e.is_hidden()) {
+                             .filter_entry(|e| !e.is_hidden()) {
             if entry.is_err() {
                 continue;
             }
@@ -237,36 +236,79 @@ impl Library {
                     self.has_db_changed = true;
                 }
             // The path is known: update the fp.
-            } else if let Some(fp2) = self.paths.get(relat) {
+            } else if let Some(fp2) = self.paths.get(relat).cloned() {
                 println!("Update fingerprint for {}: {:016X} → {:016X}.", relat.display(), fp2, fp);
-                let info = self.db.remove(fp2).unwrap();
+                let info = self.db.remove(&fp2).unwrap();
                 self.db.insert(fp, info);
                 self.db[&fp].file.size = md.len();
-                let rp1 = self.reading_state_path(*fp2);
+                self.paths.insert(relat.to_path_buf(), fp);
+                let rp1 = self.reading_state_path(fp2);
                 let rp2 = self.reading_state_path(fp);
                 fs::rename(rp1, rp2).ok();
+                let tpp = self.thumbnail_preview_path(fp2);
+                if tpp.exists() {
+                    fs::remove_file(tpp).ok();
+                }
                 self.has_db_changed = true;
-            // We found a new file: add it to the db.
             } else {
-                let kind = file_kind(&path).unwrap_or_default();
-                if !settings.allowed_kinds.contains(&kind) {
-                    continue;
-                }
-                println!("Add new entry: {:016X}, {}.", fp, relat.display());
-                let size = md.len();
-                let file = FileInfo {
-                    path: relat.to_path_buf(),
-                    kind,
-                    size,
+                let fp1 = self.fat32_epoch.checked_sub(Duration::from_secs(1))
+                              .and_then(|epoch| md.fingerprint(epoch).ok()).unwrap_or(fp);
+                let fp2 = self.fat32_epoch.checked_add(Duration::from_secs(1))
+                              .and_then(|epoch| md.fingerprint(epoch).ok()).unwrap_or(fp);
+
+                let nfp = if fp1 != fp && self.db.contains_key(&fp1) {
+                    Some(fp1)
+                } else if fp2 != fp && self.db.contains_key(&fp2) {
+                    Some(fp2)
+                } else {
+                    None
                 };
-                let mut info = Info {
-                    file,
-                    .. Default::default()
-                };
-                if settings.extract_epub_metadata {
-                    extract_metadata_from_epub(prefix.as_ref(), &mut info);
+
+                // On a FAT32 file system, the modification time has a two-second precision.
+                // This might be the reason why the modification time of a file can sometimes
+                // drift by one second, when the file is created within an operating system
+                // and moved within another.
+                if let Some(nfp) = nfp {
+                    println!("Update fingerprint for {}: {:016X} → {:016X}.", self.db[&nfp].file.path.display(), nfp, fp);
+                    let info = self.db.remove(&nfp).unwrap();
+                    self.db.insert(fp, info);
+                    let rp1 = self.reading_state_path(nfp);
+                    let rp2 = self.reading_state_path(fp);
+                    fs::rename(rp1, rp2).ok();
+                    let tp1 = self.thumbnail_preview_path(nfp);
+                    let tp2 = self.thumbnail_preview_path(fp);
+                    fs::rename(tp1, tp2).ok();
+                    if relat != self.db[&fp].file.path {
+                        println!("Update path for {:016X}: {} → {}.",
+                                 fp, self.db[&fp].file.path.display(), relat.display());
+                        self.paths.remove(&self.db[&fp].file.path);
+                        self.paths.insert(relat.to_path_buf(), fp);
+                        self.db[&fp].file.path = relat.to_path_buf();
+                    }
+                // We found a new file: add it to the db.
+                } else {
+                    let kind = file_kind(&path).unwrap_or_default();
+                    if !settings.allowed_kinds.contains(&kind) {
+                        continue;
+                    }
+                    println!("Add new entry: {:016X}, {}.", fp, relat.display());
+                    let size = md.len();
+                    let file = FileInfo {
+                        path: relat.to_path_buf(),
+                        kind,
+                        size,
+                    };
+                    let mut info = Info {
+                        file,
+                        .. Default::default()
+                    };
+                    if settings.extract_epub_metadata {
+                        extract_metadata_from_epub(prefix.as_ref(), &mut info);
+                    }
+                    self.db.insert(fp, info);
+                    self.paths.insert(relat.to_path_buf(), fp);
                 }
-                self.db.insert(fp, info);
+
                 self.has_db_changed = true;
             }
         }
@@ -284,6 +326,109 @@ impl Library {
         self.paths.insert(info.file.path.clone(), fp);
         self.db.insert(fp, info);
         self.has_db_changed = true;
+    }
+
+    pub fn remove<P: AsRef<Path>>(&mut self, path: P) -> Result<(), Error> {
+        let full_path = self.home.join(path.as_ref());
+
+        let fp = self.paths.get(path.as_ref()).cloned().or_else(|| {
+           full_path.metadata().ok()
+                    .and_then(|md| md.fingerprint(self.fat32_epoch).ok())
+        }).ok_or_else(|| format_err!("Can't get fingerprint of {}.", path.as_ref().display()))?;
+
+        if full_path.exists() {
+            fs::remove_file(&full_path)?;
+            if let Some(parent) = full_path.parent() {
+                if parent != self.home {
+                    fs::remove_dir(parent).ok();
+                }
+            }
+        }
+
+        let rsp = self.reading_state_path(fp);
+        if rsp.exists() {
+            fs::remove_file(rsp)?;
+        }
+
+        let tpp = self.thumbnail_preview_path(fp);
+        if tpp.exists() {
+            fs::remove_file(tpp)?;
+        }
+
+        if self.mode == LibraryMode::Database {
+            self.paths.remove(path.as_ref());
+            if self.db.shift_remove(&fp).is_some() {
+                self.has_db_changed = true;
+            }
+        } else {
+            self.reading_states.remove(&fp);
+        }
+
+        self.modified_reading_states.remove(&fp);
+
+        Ok(())
+    }
+
+    pub fn move_to<P: AsRef<Path>>(&mut self, path: P, other: &mut Library) -> Result<(), Error> {
+        if !self.home.join(path.as_ref()).exists() {
+            return Err(format_err!("Can't move non-existing file {}.", path.as_ref().display()));
+        }
+
+        let fp = self.paths.get(path.as_ref()).cloned().or_else(|| {
+            self.home.join(path.as_ref())
+                .metadata().ok()
+                .and_then(|md| md.fingerprint(self.fat32_epoch).ok())
+        }).ok_or_else(|| format_err!("Can't get fingerprint of {}.", path.as_ref().display()))?;
+
+        let src = self.home.join(path.as_ref());
+        let mut dest = other.home.join(path.as_ref());
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        if dest.exists() {
+            let prefix = Local::now().format("%Y%m%d_%H%M%S ");
+            let name = dest.file_name().and_then(|name| name.to_str())
+                           .map(|name| prefix.to_string() + name)
+                           .ok_or_else(|| format_err!("Can't compute new name for {}.", dest.display()))?;
+            dest.set_file_name(name);
+        }
+
+        fs::rename(&src, &dest)?;
+
+        let rsp_src = self.reading_state_path(fp);
+        if rsp_src.exists() {
+            let rsp_dest = other.reading_state_path(fp);
+            fs::rename(&rsp_src, &rsp_dest)?;
+        }
+
+        let tpp_src = self.thumbnail_preview_path(fp);
+        if tpp_src.exists() {
+            let tpp_dest = other.thumbnail_preview_path(fp);
+            fs::rename(&tpp_src, &tpp_dest)?;
+        }
+
+        if self.mode == LibraryMode::Database {
+            if let Some(mut info) = self.db.shift_remove(&fp) {
+                let dest_path = dest.strip_prefix(&other.home)?;
+                info.file.path = dest_path.to_path_buf();
+                other.db.insert(fp, info);
+                self.paths.remove(path.as_ref());
+                other.paths.insert(dest_path.to_path_buf(), fp);
+                self.has_db_changed = true;
+                other.has_db_changed = true;
+            }
+        } else {
+            if let Some(reader_info) = self.reading_states.remove(&fp) {
+                other.reading_states.insert(fp, reader_info);
+            }
+        }
+
+        if self.modified_reading_states.remove(&fp) {
+            other.modified_reading_states.insert(fp);
+        }
+
+        Ok(())
     }
 
     pub fn clean_up(&mut self) {
@@ -399,6 +544,19 @@ impl Library {
             LibraryMode::Filesystem => {
                 self.reading_states.insert(fp, reader.clone());
             },
+        }
+    }
+
+    pub fn thumbnail_preview<P: AsRef<Path>>(&self, path: P) -> PathBuf {
+        if path.as_ref().starts_with(THUMBNAIL_PREVIEWS_DIRNAME) {
+            self.home.join(path.as_ref())
+        } else {
+            let fp = self.paths.get(path.as_ref()).cloned().unwrap_or_else(|| {
+                self.home.join(path.as_ref())
+                    .metadata().unwrap()
+                    .fingerprint(self.fat32_epoch).unwrap()
+            });
+            self.thumbnail_preview_path(fp)
         }
     }
 
@@ -518,5 +676,11 @@ impl Library {
         self.home
             .join(READING_STATES_DIRNAME)
             .join(format!("{:016X}.json", fp))
+    }
+
+    fn thumbnail_preview_path(&self, fp: u64) -> PathBuf {
+        self.home
+            .join(THUMBNAIL_PREVIEWS_DIRNAME)
+            .join(format!("{:016X}.png", fp))
     }
 }

@@ -16,8 +16,8 @@ use rand_core::SeedableRng;
 use rand_xoshiro::Xoroshiro128Plus;
 use crate::dictionary::{Dictionary, load_dictionary_from_file};
 use crate::framebuffer::{Framebuffer, RemarkableFramebuffer, Display, UpdateMode};
-use crate::view::{View, Event, EntryId, EntryKind, ViewId, AppCmd};
-use crate::view::{render, render_region, render_no_wait, render_no_wait_region, handle_event, expose};
+use crate::view::{View, Event, EntryId, EntryKind, ViewId, AppCmd, RenderData, RenderQueue};
+use crate::view::{handle_event, process_render_queue};
 use crate::view::common::{locate, locate_by_id, transfer_notifications, overlapping_rectangle};
 use crate::view::common::{toggle_input_history_menu, toggle_keyboard_layout_menu};
 use crate::view::frontlight::FrontlightWindow;
@@ -26,6 +26,9 @@ use crate::view::keyboard::{Layout};
 use crate::view::dictionary::Dictionary as DictionaryApp;
 use crate::view::calculator::Calculator;
 use crate::view::sketch::Sketch;
+use crate::view::touch_events::TouchEvents;
+use crate::view::rotation_values::RotationValues;
+use crate::document::sys_info_as_html;
 use crate::input::{DeviceEvent, PowerSource, ButtonCode, ButtonStatus, VAL_RELEASE, VAL_PRESS, InputFilterCommand};
 use crate::input::{raw_events, device_events, usb_events, display_rotate_event, button_scheme_event};
 use crate::gesture::{GestureEvent, gesture_events};
@@ -34,10 +37,10 @@ use crate::settings::{ButtonScheme, Settings, SETTINGS_PATH, RotationLock, Input
 use crate::frontlight::{Frontlight, StandardFrontlight, NaturalFrontlight, PremixedFrontlight, FakeFrontlight};
 use crate::lightsensor::{LightSensor, KoboLightSensor};
 use crate::battery::{Battery, RemarkableBattery};
-use crate::geom::{Rectangle, Edge};
+use crate::geom::{Rectangle, DiagDir, Region};
 use crate::view::home::Home;
 use crate::view::reader::Reader;
-use crate::view::confirmation::Confirmation;
+use crate::view::dialog::Dialog;
 use crate::view::intermission::{Intermission, IntermKind};
 use crate::view::notification::Notification;
 use crate::device::{CURRENT_DEVICE, Orientation, FrontlightKind};
@@ -283,7 +286,7 @@ fn schedule_task(id: TaskId, event: Event, delay: Duration, hub: &Sender<Event>,
     });
 }
 
-fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<Event>, context: &mut Context) {
+fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<Event>, rq: &mut RenderQueue, context: &mut Context) {
     if id == TaskId::Suspend {
         tasks.retain(|task| task.id != TaskId::Suspend);
         if context.settings.frontlight {
@@ -302,7 +305,7 @@ fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<E
         if let Some(index) = locate::<Intermission>(view) {
             let rect = *view.child(index).rect();
             view.children_mut().remove(index);
-            hub.send(Event::Expose(rect, UpdateMode::Full)).ok();
+            rq.add(RenderData::expose(rect, UpdateMode::Full));
         }
         hub.send(Event::ClockTick).ok();
         hub.send(Event::BatteryTick).ok();
@@ -311,9 +314,9 @@ fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<E
 
 fn power_off(view: &mut dyn View, history: &mut Vec<HistoryItem>, updating: &mut FxHashMap<u32, Rectangle>, context: &mut Context) {
     let (tx, _rx) = mpsc::channel();
-    view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), context);
+    view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), context);
     while let Some(mut item) = history.pop() {
-        item.view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), context);
+        item.view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), context);
     }
     let interm = Intermission::new(context.fb.rect(), IntermKind::PowerOff, context);
     updating.retain(|tok, _| context.fb.wait(*tok).is_err());
@@ -436,7 +439,9 @@ pub fn run() -> Result<(), Error> {
 
     let mut tasks: Vec<Task> = Vec::new();
     let mut history: Vec<HistoryItem> = Vec::new();
-    let mut view: Box<dyn View> = Box::new(Home::new(context.fb.rect(), &tx, &mut context)?);
+    let mut rq = RenderQueue::new();
+    let mut view: Box<dyn View> = Box::new(Home::new(context.fb.rect(), &tx,
+                                                     &mut rq, &mut context)?);
 
     let mut updating = FxHashMap::default();
     let current_dir = env::current_dir()?;
@@ -450,6 +455,7 @@ pub fn run() -> Result<(), Error> {
 
     schedule_task(TaskId::CheckBattery, Event::CheckBattery,
                   BATTERY_REFRESH_INTERVAL, &tx, &mut tasks);
+    tx.send(Event::WakeUp).ok();
 
     if let Ok(status) = Command::new("systemctl").arg("is-active").arg("xochitl.service").stdout(std::process::Stdio::null()).status() {
         if status.code().unwrap() == 0 {
@@ -469,12 +475,12 @@ pub fn run() -> Result<(), Error> {
                         }
 
                         if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                         } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                         } else {
                             let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                            tx.send(Event::Render(*interm.rect(), UpdateMode::Full)).ok();
+                            rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
                             schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
                                           PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
                             view.children_mut().push(Box::new(interm) as Box<dyn View>);
@@ -493,7 +499,7 @@ pub fn run() -> Result<(), Error> {
                         }
 
                         let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                        tx.send(Event::Render(*interm.rect(), UpdateMode::Full)).ok();
+                        rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
                         schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
                                       PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
                         view.children_mut().push(Box::new(interm) as Box<dyn View>);
@@ -515,9 +521,9 @@ pub fn run() -> Result<(), Error> {
                         }
 
                         if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                         } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                         }
                     },
                     DeviceEvent::NetUp => {
@@ -533,15 +539,15 @@ pub fn run() -> Result<(), Error> {
                                             .unwrap_or_default();
                         let notif = Notification::new(ViewId::NetUpNotif,
                                                       format!("Network is up ({}, {}).", ip, essid),
-                                                      &tx, &mut context);
+                                                      &tx, &mut rq, &mut context);
                         context.online = true;
                         view.children_mut().push(Box::new(notif) as Box<dyn View>);
                         if view.is::<Home>() {
-                            view.handle_event(&evt, &tx, &mut bus, &mut context);
-                        } else {
+                            view.handle_event(&evt, &tx, &mut bus, &mut rq, &mut context);
+                        } else if let Some(entry) = history.get_mut(0).filter(|entry| entry.view.is::<Home>()) {
                             let (tx, _rx) = mpsc::channel();
-                            history[0].view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut context);
-                        };
+                            entry.view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
+                        }
                     },
                     DeviceEvent::Plug(power_source) => {
                         if context.plugged {
@@ -567,20 +573,20 @@ pub fn run() -> Result<(), Error> {
                             },
                             PowerSource::Host => {
                                 if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                                    resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                                    resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                                 } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                                 }
 
                                 if context.settings.auto_share {
                                     tx.send(Event::PrepareShare).ok();
                                 } else {
-                                    let confirm = Confirmation::new(ViewId::ConfirmShare,
-                                                                    Event::PrepareShare,
-                                                                    "Share storage via USB?".to_string(),
-                                                                    &mut context);
-                                    tx.send(Event::Render(*confirm.rect(), UpdateMode::Gui)).ok();
-                                    view.children_mut().push(Box::new(confirm) as Box<dyn View>);
+                                    let dialog = Dialog::new(ViewId::ShareDialog,
+                                                             Some(Event::PrepareShare),
+                                                             "Share storage via USB?".to_string(),
+                                                             &mut context);
+                                    rq.add(RenderData::new(dialog.id(), *dialog.rect(), UpdateMode::Gui));
+                                    view.children_mut().push(Box::new(dialog) as Box<dyn View>);
                                 }
 
                                 inactive_since = Instant::now();
@@ -618,7 +624,7 @@ pub fn run() -> Result<(), Error> {
                             if let Some(index) = locate::<Intermission>(view.as_ref()) {
                                 let rect = *view.child(index).rect();
                                 view.children_mut().remove(index);
-                                tx.send(Event::Expose(rect, UpdateMode::Full)).ok();
+                                rq.add(RenderData::expose(rect, UpdateMode::Full));
                             }
                             if Path::new(KOBO_UPDATE_BUNDLE).exists() {
                                 tx.send(Event::Select(EntryId::Reboot)).ok();
@@ -627,7 +633,7 @@ pub fn run() -> Result<(), Error> {
                             if context.settings.import.unshare_trigger {
                                 context.batch_import();
                             }
-                            view.handle_event(&Event::Reseed, &tx, &mut bus, &mut context);
+                            view.handle_event(&Event::Reseed, &tx, &mut bus, &mut rq, &mut context);
                         } else {
                             context.plugged = false;
                             schedule_task(TaskId::CheckBattery, Event::CheckBattery,
@@ -638,7 +644,7 @@ pub fn run() -> Result<(), Error> {
                                     schedule_task(TaskId::Suspend, Event::Suspend,
                                                   SUSPEND_WAIT_DELAY, &tx, &mut tasks);
                                 } else {
-                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut context);
+                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
                                 }
                             } else {
                                 tx.send(Event::BatteryTick).ok();
@@ -666,7 +672,7 @@ pub fn run() -> Result<(), Error> {
                         inactive_since = Instant::now();
                     },
                     _ => {
-                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut context);
+                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
                     }
                 }
             },
@@ -685,7 +691,7 @@ pub fn run() -> Result<(), Error> {
                     } else if v < context.settings.battery.warn {
                         let notif = Notification::new(ViewId::LowBatteryNotif,
                                                       "The battery capacity is getting low.".to_string(),
-                                                      &tx, &mut context);
+                                                      &tx, &mut rq, &mut context);
                         view.children_mut().push(Box::new(notif) as Box<dyn View>);
                     }
                 }
@@ -754,9 +760,9 @@ pub fn run() -> Result<(), Error> {
                 }
 
                 tasks.clear();
-                view.handle_event(&Event::Back, &tx, &mut bus, &mut context);
+                view.handle_event(&Event::Back, &tx, &mut bus, &mut rq, &mut context);
                 while let Some(mut item) = history.pop() {
-                    item.view.handle_event(&Event::Back, &tx, &mut bus, &mut context);
+                    item.view.handle_event(&Event::Back, &tx, &mut bus, &mut rq, &mut context);
                     if item.rotation != context.display.rotation {
                         updating.retain(|tok, _| context.fb.wait(*tok).is_err());
                         if let Ok(dims) = context.fb.set_rotation(item.rotation) {
@@ -783,7 +789,7 @@ pub fn run() -> Result<(), Error> {
                     context.online = false;
                 }
                 let interm = Intermission::new(context.fb.rect(), IntermKind::Share, &context);
-                tx.send(Event::Render(*interm.rect(), UpdateMode::Full)).ok();
+                rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
                 view.children_mut().push(Box::new(interm) as Box<dyn View>);
                 tx.send(Event::Share).ok();
             },
@@ -803,60 +809,34 @@ pub fn run() -> Result<(), Error> {
                         break;
                     },
                     GestureEvent::MultiTap(mut points) => {
-                        let mut rect = context.fb.rect();
-                        let w = rect.width() as i32;
-                        let h = rect.height() as i32;
-                        let m = w.min(h);
-                        rect.shrink(&Edge::uniform(m / 12));
                         if points[0].x > points[1].x {
                             points.swap(0, 1);
                         }
-                        if points[0].dist2(points[1]) >= rect.diag2() {
-                            if points[0].y < points[1].y {
+                        let rect = context.fb.rect();
+                        let r1 = Region::from_point(points[0], rect,
+                                                    context.settings.reader.strip_width,
+                                                    context.settings.reader.corner_width);
+                        let r2 = Region::from_point(points[1], rect,
+                                                    context.settings.reader.strip_width,
+                                                    context.settings.reader.corner_width);
+                        match (r1, r2) {
+                            (Region::Corner(DiagDir::SouthWest), Region::Corner(DiagDir::NorthEast)) => {
+                                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Full));
+                            },
+                            (Region::Corner(DiagDir::NorthWest), Region::Corner(DiagDir::SouthEast)) => {
                                 tx.send(Event::Select(EntryId::TakeScreenshot)).ok();
-                            } else {
-                                tx.send(Event::Render(context.fb.rect(), UpdateMode::Full)).ok();
-                            }
+                            },
+                            _ => (),
                         }
                     },
                     _ => {
-                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut context);
+                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
                     },
                 }
             },
             Event::ToggleFrontlight => {
                 context.set_frontlight(!context.settings.frontlight);
-                view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut context);
-            },
-            Event::Render(mut rect, mode) => {
-                render(view.as_ref(), &mut rect, context.fb.as_mut(), &mut context.fonts, &mut updating);
-                if let Ok(tok) = context.fb.update(&rect, mode) {
-                    updating.insert(tok, rect);
-                }
-            },
-            Event::RenderRegion(mut rect, mode) => {
-                render_region(view.as_ref(), &mut rect, context.fb.as_mut(), &mut context.fonts, &mut updating);
-                if let Ok(tok) = context.fb.update(&rect, mode) {
-                    updating.insert(tok, rect);
-                }
-            },
-            Event::RenderNoWait(mut rect, mode) => {
-                render_no_wait(view.as_ref(), &mut rect, context.fb.as_mut(), &mut context.fonts, &mut updating);
-                if let Ok(tok) = context.fb.update(&rect, mode) {
-                    updating.insert(tok, rect);
-                }
-            },
-            Event::RenderNoWaitRegion(mut rect, mode) => {
-                render_no_wait_region(view.as_ref(), &mut rect, context.fb.as_mut(), &mut context.fonts, &mut updating);
-                if let Ok(tok) = context.fb.update(&rect, mode) {
-                    updating.insert(tok, rect);
-                }
-            },
-            Event::Expose(mut rect, mode) => {
-                expose(view.as_ref(), &mut rect, context.fb.as_mut(), &mut context.fonts, &mut updating);
-                if let Ok(tok) = context.fb.update(&rect, mode) {
-                    updating.insert(tok, rect);
-                }
+                view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut rq, &mut context);
             },
             Event::Open(info) => {
                 let rotation = context.display.rotation;
@@ -871,10 +851,10 @@ pub fn run() -> Result<(), Error> {
                         }
                     }
                 }*/
-                let info2 = info.clone();
+                let path = info.file.path.clone();
                 if let Some(r) = Reader::new(context.fb.rect(), *info, &tx, &mut context) {
                     let mut next_view = Box::new(r) as Box<dyn View>;
-                    transfer_notifications(view.as_mut(), next_view.as_mut(), &mut context);
+                    transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
                     history.push(HistoryItem {
                         view,
                         rotation,
@@ -889,13 +869,35 @@ pub fn run() -> Result<(), Error> {
                             context.display.dims = dims;
                         }
                     }
-                    handle_event(view.as_mut(), &Event::Invalid(info2), &tx, &mut bus, &mut context);
+                    handle_event(view.as_mut(), &Event::Invalid(path), &tx, &mut bus, &mut rq, &mut context);
                 }
             },
-            Event::OpenToc(ref toc, chap_index) => {
-                let r = Reader::from_toc(context.fb.rect(), toc, chap_index, &tx, &mut context);
+            Event::Select(EntryId::About) => {
+                let dialog = Dialog::new(ViewId::AboutDialog,
+                                         None,
+                                         format!("Plato {}", env!("CARGO_PKG_VERSION")),
+                                         &mut context);
+                rq.add(RenderData::new(dialog.id(), *dialog.rect(), UpdateMode::Gui));
+                view.children_mut().push(Box::new(dialog) as Box<dyn View>);
+            },
+            Event::Select(EntryId::SystemInfo) => {
+                view.children_mut().retain(|child| !child.is::<Menu>());
+                let html = sys_info_as_html();
+                let r = Reader::from_html(context.fb.rect(), &html, None, &tx, &mut context);
                 let mut next_view = Box::new(r) as Box<dyn View>;
-                transfer_notifications(view.as_mut(), next_view.as_mut(), &mut context);
+                transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
+                history.push(HistoryItem {
+                    view,
+                    rotation: context.display.rotation,
+                    monochrome: context.fb.monochrome(),
+                });
+                view = next_view;
+            },
+            Event::OpenHtml(ref html, ref link_uri) => {
+                view.children_mut().retain(|child| !child.is::<Menu>());
+                let r = Reader::from_html(context.fb.rect(), html, link_uri.as_deref(), &tx, &mut context);
+                let mut next_view = Box::new(r) as Box<dyn View>;
+                transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
                 history.push(HistoryItem {
                     view,
                     rotation: context.display.rotation,
@@ -909,12 +911,19 @@ pub fn run() -> Result<(), Error> {
                 let mut next_view: Box<dyn View> = match app_cmd {
                     AppCmd::Sketch => {
                         context.fb.set_monochrome(true);
-                        Box::new(Sketch::new(context.fb.rect(), &tx, &mut context))
+                        Box::new(Sketch::new(context.fb.rect(), &mut rq, &mut context))
                     },
-                    AppCmd::Calculator => Box::new(Calculator::new(context.fb.rect(), &tx, &mut context)?),
-                    AppCmd::Dictionary { ref query, ref language } => Box::new(DictionaryApp::new(context.fb.rect(), query, language, &tx, &mut context)),
+                    AppCmd::Calculator => Box::new(Calculator::new(context.fb.rect(), &tx, &mut rq, &mut context)?),
+                    AppCmd::Dictionary { ref query, ref language } => Box::new(DictionaryApp::new(context.fb.rect(), query,
+                                                                                                  language, &tx, &mut rq, &mut context)),
+                    AppCmd::TouchEvents => {
+                        Box::new(TouchEvents::new(context.fb.rect(), &mut rq, &mut context))
+                    },
+                    AppCmd::RotationValues => {
+                        Box::new(RotationValues::new(context.fb.rect(), &mut rq, &mut context))
+                    },
                 };
-                transfer_notifications(view.as_mut(), next_view.as_mut(), &mut context);
+                transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
                 history.push(HistoryItem {
                     view,
                     rotation: context.display.rotation,
@@ -936,8 +945,8 @@ pub fn run() -> Result<(), Error> {
                             context.display.dims = dims;
                         }
                     }
-                    view.handle_event(&Event::Reseed, &tx, &mut bus, &mut context);
-                } else {
+                    view.handle_event(&Event::Reseed, &tx, &mut bus, &mut rq, &mut context);
+                } else if !view.is::<Home>() {
                     break;
                 }
             },
@@ -945,57 +954,57 @@ pub fn run() -> Result<(), Error> {
                 if let Some(index) = locate_by_id(view.as_ref(), ViewId::PresetMenu) {
                     let rect = *view.child(index).rect();
                     view.children_mut().remove(index);
-                    tx.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::expose(rect, UpdateMode::Gui));
                 } else {
                     let preset_menu = Menu::new(rect, ViewId::PresetMenu, MenuKind::Contextual,
                                                 vec![EntryKind::Command("Remove".to_string(),
                                                                         EntryId::RemovePreset(index))],
                                                 &mut context);
-                    tx.send(Event::Render(*preset_menu.rect(), UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(preset_menu.id(), *preset_menu.rect(), UpdateMode::Gui));
                     view.children_mut().push(Box::new(preset_menu) as Box<dyn View>);
                 }
             },
             Event::Show(ViewId::Frontlight) => {
                 if !context.settings.frontlight {
                     context.set_frontlight(true);
-                    view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut context);
+                    view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut rq, &mut context);
                 }
                 let flw = FrontlightWindow::new(&mut context);
-                tx.send(Event::Render(*flw.rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(flw.id(), *flw.rect(), UpdateMode::Gui));
                 view.children_mut().push(Box::new(flw) as Box<dyn View>);
             },
             Event::ToggleInputHistoryMenu(id, rect) => {
-                toggle_input_history_menu(view.as_mut(), id, rect, None, &tx, &mut context);
+                toggle_input_history_menu(view.as_mut(), id, rect, None, &mut rq, &mut context);
             },
             Event::ToggleNear(ViewId::KeyboardLayoutMenu, rect) => {
-                toggle_keyboard_layout_menu(view.as_mut(), rect, None, &tx, &mut context);
+                toggle_keyboard_layout_menu(view.as_mut(), rect, None, &mut rq, &mut context);
             },
             Event::Close(ViewId::Frontlight) => {
                 if let Some(index) = locate::<FrontlightWindow>(view.as_ref()) {
                     let rect = *view.child(index).rect();
                     view.children_mut().remove(index);
-                    tx.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::expose(rect, UpdateMode::Gui));
                 }
             },
             Event::Close(id) => {
                 if let Some(index) = locate_by_id(view.as_ref(), id) {
                     let rect = overlapping_rectangle(view.child(index));
-                    tx.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::expose(rect, UpdateMode::Gui));
                     view.children_mut().remove(index);
                 }
             },
             Event::Select(EntryId::ToggleInverted) => {
                 context.fb.toggle_inverted();
-                tx.send(Event::Render(context.fb.rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
             },
             Event::Select(EntryId::ToggleMonochrome) => {
                 context.fb.toggle_monochrome();
-                tx.send(Event::Render(context.fb.rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
             },
             Event::Select(EntryId::RefreshQuality(quality)) => {
                 context.fb.set_refresh_quality(quality);
                 context.settings.remarkable.refresh_quality = quality;
-                tx.send(Event::Render(context.fb.rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
             },
             Event::Select(EntryId::ToggleInputSource(source)) => {
                 if context.settings.remarkable.input_sources.contains(&source) {
@@ -1017,7 +1026,7 @@ pub fn run() -> Result<(), Error> {
                         // Notify
                         let msg = format!("Automatically enabled input by {}", other_source);
                         let notif = Notification::new(ViewId::TakeScreenshotNotif,
-                                              msg, &tx, &mut context);
+                                              msg, &tx, &mut rq, &mut context);
                         view.children_mut().push(Box::new(notif) as Box<dyn View>);
                     }
                     let source_index = context.settings.remarkable.input_sources.iter().position(|&e| e == source).unwrap();
@@ -1038,14 +1047,15 @@ pub fn run() -> Result<(), Error> {
                     }).unwrap();
                 }
 
-                tx.send(Event::Render(context.fb.rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
             },
             Event::Select(EntryId::ToggleIntermissionImage(ref kind, ref path)) => {
+                let full_path = context.library.home.join(path);
                 let key = kind.key();
-                if context.settings.intermission_images.get(key) == Some(path) {
+                if context.settings.intermission_images.get(key) == Some(&full_path) {
                     context.settings.intermission_images.remove(key);
                 } else {
-                    context.settings.intermission_images.insert(key.to_string(), path.clone());
+                    context.settings.intermission_images.insert(key.to_string(), full_path);
                 }
             },
             Event::Select(EntryId::Rotate(n)) if n != context.display.rotation && view.might_rotate() => {
@@ -1056,9 +1066,9 @@ pub fn run() -> Result<(), Error> {
                     let fb_rect = Rectangle::from(dims);
                     if context.display.dims != dims {
                         context.display.dims = dims;
-                        view.resize(fb_rect, &tx, &mut context);
+                        view.resize(fb_rect, &tx, &mut rq, &mut context);
                     } else {
-                        tx.send(Event::Render(context.fb.rect(), UpdateMode::Full)).ok();
+                        rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Full));
                     }
                 }
             },
@@ -1088,24 +1098,26 @@ pub fn run() -> Result<(), Error> {
             Event::Select(EntryId::TakeScreenshot) => {
                 let name = Local::now().format("screenshot-%Y%m%d_%H%M%S.png");
                 let msg = match context.fb.save(&name.to_string()) {
-                    Err(e) => format!("Couldn't take screenshot: {}).", e),
+                    Err(e) => format!("{}", e),
                     Ok(_) => format!("Saved {}.", name),
                 };
                 let notif = Notification::new(ViewId::TakeScreenshotNotif,
-                                              msg, &tx, &mut context);
+                                              msg, &tx, &mut rq, &mut context);
                 view.children_mut().push(Box::new(notif) as Box<dyn View>);
             },
-            Event::AddDocument(..) => {
-                if view.is::<Home>() {
-                    view.handle_event(&evt, &tx, &mut bus, &mut context);
-                } else {
+            Event::CheckFetcher(..) |
+            Event::FetcherAddDocument(..) |
+            Event::FetcherSearch { .. } |
+            Event::FetcherCleanUp(..) |
+            Event::FetcherImport(..) if !view.is::<Home>() => {
+                if let Some(entry) = history.get_mut(0).filter(|entry| entry.view.is::<Home>()) {
                     let (tx, _rx) = mpsc::channel();
-                    history[0].view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut context);
-                };
+                    entry.view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
+                }
             },
             Event::Notify(msg) => {
                 let notif = Notification::new(ViewId::MessageNotif,
-                                              msg, &tx, &mut context);
+                                              msg, &tx, &mut rq, &mut context);
                 view.children_mut().push(Box::new(notif) as Box<dyn View>);
             },
             Event::Select(EntryId::Reboot) => {
@@ -1139,16 +1151,18 @@ pub fn run() -> Result<(), Error> {
                 let seconds = 60 * context.settings.auto_suspend as u64;
                 if inactive_since.elapsed() > Duration::from_secs(seconds) {
                     let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                    tx.send(Event::Render(*interm.rect(), UpdateMode::Full)).ok();
+                    rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
                     schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
                                   PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
                     view.children_mut().push(Box::new(interm) as Box<dyn View>);
                 }
             },
             _ => {
-                handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut context);
+                handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
             },
         }
+
+        process_render_queue(view.as_ref(), &mut rq, &mut context, &mut updating);
 
         while let Some(ce) = bus.pop_front() {
             tx.send(ce).ok();
@@ -1159,8 +1173,10 @@ pub fn run() -> Result<(), Error> {
         context.fb.set_rotation(initial_rotation).ok();
     }
 
-    if context.settings.frontlight {
-        context.settings.frontlight_levels = context.frontlight.levels();
+    if tasks.iter().all(|task| task.id != TaskId::Suspend) {
+        if context.settings.frontlight {
+            context.settings.frontlight_levels = context.frontlight.levels();
+        }
     }
 
     context.library.flush();

@@ -9,12 +9,13 @@ use anyhow::Error;
 use crate::device::CURRENT_DEVICE;
 use crate::geom::{Point, Rectangle, CornerSpec};
 use crate::input::{DeviceEvent, FingerStatus};
-use crate::view::icon::Icon;
+use crate::view::icon::{Icon, ICONS_PIXMAPS};
 use crate::view::notification::Notification;
 use crate::view::menu::{Menu, MenuKind};
 use crate::view::common::{locate_by_id};
-use crate::view::{View, Event, Hub, Bus, EntryKind, EntryId, ViewId};
-use crate::view::SMALL_BAR_HEIGHT;
+use crate::view::{View, Event, Hub, Bus, RenderQueue, RenderData};
+use crate::view::{EntryKind, EntryId, ViewId, Id, ID_FEEDER};
+use crate::view::{SMALL_BAR_HEIGHT, BORDER_RADIUS_SMALL};
 use crate::framebuffer::{Framebuffer, UpdateMode, Pixmap};
 use crate::settings::{ImportSettings, Pen};
 use crate::helpers::IsHidden;
@@ -24,6 +25,7 @@ use crate::color::{BLACK, WHITE};
 use crate::app::Context;
 
 const FILENAME_PATTERN: &str = "sketch-%Y%m%d_%H%M%S.png";
+const ICON_NAME: &str = "enclosed_menu";
 // https://oeis.org/A000041
 const PEN_SIZES: [i32; 12] = [1, 2, 3, 5, 7, 11, 15, 22, 30, 42, 56, 77];
 
@@ -40,6 +42,7 @@ impl TouchState {
 }
 
 pub struct Sketch {
+    id: Id,
     rect: Rectangle,
     children: Vec<Box<dyn View>>,
     pixmap: Pixmap,
@@ -51,23 +54,31 @@ pub struct Sketch {
 }
 
 impl Sketch {
-    pub fn new(rect: Rectangle, hub: &Hub, context: &mut Context) -> Sketch {
+    pub fn new(rect: Rectangle, rq: &mut RenderQueue, context: &mut Context) -> Sketch {
+        let id = ID_FEEDER.next();
         let mut children = Vec::new();
         let dpi = CURRENT_DEVICE.dpi;
         let small_height = scale_by_dpi(SMALL_BAR_HEIGHT, dpi) as i32;
-        let side = small_height;
-        let icon_rect = rect![rect.min.x, rect.max.y - side,
-                              rect.min.x + side, rect.max.y];
-        let icon = Icon::new("ellipsis",
+        let border_radius = scale_by_dpi(BORDER_RADIUS_SMALL, dpi) as i32;
+        let pixmap = &ICONS_PIXMAPS[ICON_NAME];
+        let icon_padding = (small_height - pixmap.width.max(pixmap.height) as i32) / 2;
+        let width = pixmap.width as i32 + icon_padding;
+        let height = pixmap.height as i32 + icon_padding;
+        let dx = (small_height - width) / 2;
+        let dy = (small_height - height) / 2;
+        let icon_rect = rect![rect.min.x + dx, rect.max.y - dy - height,
+                              rect.min.x + dx + width, rect.max.y - dy];
+        let icon = Icon::new(ICON_NAME,
                              icon_rect,
                              Event::ToggleNear(ViewId::TitleMenu, icon_rect))
-                        .corners(Some(CornerSpec::Uniform(side / 2)));
+                        .corners(Some(CornerSpec::Uniform(border_radius)));
         children.push(Box::new(icon) as Box<dyn View>);
         let mut random = Pixmap::new(rect.width(), rect.height());
         context.rng.fill_bytes(random.data_mut());
         let save_path = context.library.home.join(&context.settings.sketch.save_path);
-        hub.send(Event::Render(rect, UpdateMode::Full)).ok();
+        rq.add(RenderData::new(id, rect, UpdateMode::Full));
         Sketch {
+            id,
             rect,
             children,
             pixmap: Pixmap::new(rect.width(), rect.height()),
@@ -79,13 +90,13 @@ impl Sketch {
         }
     }
 
-    fn toggle_title_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_title_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::SketchMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -151,7 +162,7 @@ impl Sketch {
             }
 
             let sketch_menu = Menu::new(rect, ViewId::SketchMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*sketch_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(sketch_menu.id(), *sketch_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(sketch_menu) as Box<dyn View>);
         }
     }
@@ -184,7 +195,7 @@ impl Sketch {
 }
 
 #[inline]
-fn draw_segment(pixmap: &mut Pixmap, ts: &mut TouchState, position: Point, time: f64, pen: &Pen, fb_rect: &Rectangle, hub: &Hub) {
+fn draw_segment(pixmap: &mut Pixmap, ts: &mut TouchState, position: Point, time: f64, pen: &Pen, id: Id, fb_rect: &Rectangle, rq: &mut RenderQueue) {
     let (start_radius, end_radius) = if pen.dynamic {
         if time > ts.time {
             let d = vec2!((position.x - ts.pt.x) as f32,
@@ -208,7 +219,7 @@ fn draw_segment(pixmap: &mut Pixmap, ts: &mut TouchState, position: Point, time:
     pixmap.draw_segment(ts.pt, position, start_radius, end_radius, pen.color);
 
     if let Some(render_rect) = rect.intersection(fb_rect) {
-        hub.send(Event::RenderNoWaitRegion(render_rect, UpdateMode::FastMono)).ok();
+        rq.add(RenderData::no_wait(id, render_rect, UpdateMode::FastMono));
     }
 
     ts.pt = position;
@@ -217,11 +228,11 @@ fn draw_segment(pixmap: &mut Pixmap, ts: &mut TouchState, position: Point, time:
 }
 
 impl View for Sketch {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, rq: &mut RenderQueue, context: &mut Context) -> bool {
         match *evt {
             Event::Device(DeviceEvent::Finger { status: FingerStatus::Motion, id, position, time }) => {
                 if let Some(ts) = self.fingers.get_mut(&id) {
-                    draw_segment(&mut self.pixmap, ts, position, time, &self.pen, &self.rect, hub);
+                    draw_segment(&mut self.pixmap, ts, position, time, &self.pen, self.id, &self.rect, rq);
                 }
                 true
             },
@@ -232,13 +243,13 @@ impl View for Sketch {
             },
             Event::Device(DeviceEvent::Finger { status: FingerStatus::Up, id, position, time }) => {
                 if let Some(ts) = self.fingers.get_mut(&id) {
-                    draw_segment(&mut self.pixmap, ts, position, time, &self.pen, &self.rect, hub);
+                    draw_segment(&mut self.pixmap, ts, position, time, &self.pen, self.id, &self.rect, rq);
                 }
                 self.fingers.remove(&id);
                 true
             },
             Event::ToggleNear(ViewId::TitleMenu, rect) => {
-                self.toggle_title_menu(rect, None, hub, context);
+                self.toggle_title_menu(rect, None, rq, context);
                 true
             },
             Event::Select(EntryId::SetPenSize(size)) => {
@@ -256,21 +267,21 @@ impl View for Sketch {
             Event::Select(EntryId::Load(ref name)) => {
                 if let Err(e) = self.load(name) {
                     let msg = format!("Couldn't load sketch: {}).", e);
-                    let notif = Notification::new(ViewId::LoadSketchNotif, msg, hub, context);
+                    let notif = Notification::new(ViewId::LoadSketchNotif, msg, hub, rq, context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
                 } else {
-                    hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                 }
                 true
             },
             Event::Select(EntryId::Refresh) => {
-                hub.send(Event::Render(self.rect, UpdateMode::Full)).ok();
+                rq.add(RenderData::new(self.id, self.rect, UpdateMode::Full));
                 true
             },
             Event::Select(EntryId::New) => {
                 self.pixmap.clear(WHITE);
                 self.filename = Local::now().format(FILENAME_PATTERN).to_string();
-                hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                 true
             },
             Event::Select(EntryId::Save) => {
@@ -286,7 +297,7 @@ impl View for Sketch {
                 };
                 if let Some(msg) = msg.take() {
                     let notif = Notification::new(ViewId::SaveSketchNotif,
-                                                  msg, hub, context);
+                                                  msg, hub, rq, context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
                 }
                 true
@@ -331,5 +342,9 @@ impl View for Sketch {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.children
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

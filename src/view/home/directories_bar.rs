@@ -2,7 +2,7 @@ use std::path::{PathBuf, Path};
 use crate::device::CURRENT_DEVICE;
 use std::collections::BTreeSet;
 use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, Align};
+use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, Align};
 use crate::view::icon::{Icon, ICONS_PIXMAPS};
 use crate::view::{SMALL_BAR_HEIGHT, THICKNESS_MEDIUM};
 use crate::view::filler::Filler;
@@ -16,6 +16,7 @@ use crate::app::Context;
 
 #[derive(Debug)]
 pub struct DirectoriesBar {
+    id: Id,
     pub rect: Rectangle,
     pub path: PathBuf,
     pages: Vec<Vec<Box<dyn View>>>,
@@ -83,6 +84,7 @@ impl<'a> Item<'a> {
 impl DirectoriesBar {
     pub fn new<P: AsRef<Path>>(rect: Rectangle, path: P) -> DirectoriesBar {
         DirectoriesBar {
+            id: ID_FEEDER.next(),
             rect,
             path: path.as_ref().to_path_buf(),
             current_page: 0,
@@ -106,6 +108,10 @@ impl DirectoriesBar {
             .map(|dir| &dir.path)
             .cloned()
             .collect()
+    }
+
+    pub fn go_to_page(&mut self, index: usize) {
+        self.current_page = index;
     }
 
     pub fn set_current_page(&mut self, dir: CycleDir) {
@@ -297,6 +303,22 @@ impl DirectoriesBar {
         let mut pos = pt!(self.rect.min.x + small_half(padding),
                           self.rect.min.y + small_half(baselines[0]));
 
+        // Top filler.
+        let filler = Filler::new(rect![self.rect.min,
+                                       pt!(self.rect.max.x,
+                                           self.rect.min.y + small_half(baselines[0]))],
+                                 background);
+        children.push(Box::new(filler) as Box<dyn View>);
+
+        // Left filler.
+        let filler = Filler::new(rect![pt!(self.rect.min.x,
+                                           self.rect.min.y + small_half(baselines[0])),
+                                       pt!(self.rect.min.x + small_half(padding),
+                                           self.rect.max.y - big_half(baselines[max_lines]))],
+                                 background);
+        children.push(Box::new(filler) as Box<dyn View>);
+
+
         for (line_index, line) in page.lines.iter().enumerate() {
 
             let paddings = if line_index == lines_count - 1 && page.end_index == directories_count {
@@ -374,18 +396,9 @@ impl DirectoriesBar {
             children.push(Box::new(filler) as Box<dyn View>);
         }
         
-        // Top filler.
-        let filler = Filler::new(rect![self.rect.min,
-                                       pt!(self.rect.max.x,
-                                           self.rect.min.y + small_half(baselines[0]))],
-                                 background);
-        children.push(Box::new(filler) as Box<dyn View>);
-
-        // Left filler.
-        let filler = Filler::new(rect![pt!(self.rect.min.x,
-                                           self.rect.min.y + small_half(baselines[0])),
-                                       pt!(self.rect.min.x + small_half(padding),
-                                           self.rect.max.y - big_half(baselines[max_lines]))],
+        // Right filler.
+        let filler = Filler::new(rect![pt!(self.rect.max.x - big_half(padding), self.rect.min.y + small_half(baselines[0])),
+                                       pt!(self.rect.max.x, self.rect.max.y - big_half(baselines[max_lines]))],
                                  background);
         children.push(Box::new(filler) as Box<dyn View>);
 
@@ -395,36 +408,58 @@ impl DirectoriesBar {
                                  background);
         children.push(Box::new(filler) as Box<dyn View>);
 
-        // Right filler.
-        let filler = Filler::new(rect![pt!(self.rect.max.x - big_half(padding), self.rect.min.y + small_half(baselines[0])),
-                                       pt!(self.rect.max.x, self.rect.max.y - big_half(baselines[max_lines]))],
-                                 background);
-        children.push(Box::new(filler) as Box<dyn View>);
         children
     }
 }
 
 impl View for DirectoriesBar {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, _context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, _hub: &Hub, _bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Swipe { dir, start, .. }) if self.rect.includes(start) => {
                 match dir {
                     Dir::West => {
                         self.set_current_page(CycleDir::Next);
-                        hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                         true
                     },
                     Dir::East => {
                         self.set_current_page(CycleDir::Previous);
-                        hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                         true
                     },
                     _ => false,
                 }
             },
             Event::Page(dir) => {
+                let current_page = self.current_page;
                 self.set_current_page(dir);
-                hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                if self.current_page != current_page {
+                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                }
+                true
+            },
+            Event::Chapter(dir) => {
+                let pages_count = self.pages.len();
+                if pages_count > 1 {
+                    let current_page = self.current_page;
+                    match dir {
+                        CycleDir::Previous => self.go_to_page(0),
+                        CycleDir::Next => self.go_to_page(pages_count - 1),
+                    }
+                    if self.current_page != current_page {
+                        let page = &mut self.pages[current_page];
+                        let index = match dir {
+                            CycleDir::Previous => 2,
+                            CycleDir::Next => page.len() - 3,
+                        };
+                        if let Some(icon) = page[index].downcast_mut::<Icon>() {
+                            icon.active = false;
+                        } else {
+                            println!("oups");
+                        }
+                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                    }
+                }
                 true
             },
             _ => false,
@@ -448,5 +483,9 @@ impl View for DirectoriesBar {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.pages[self.current_page]
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

@@ -27,6 +27,39 @@ This is a view of the books within the current directory.
 - Swipe west/east to go to the next/previous page.
 - Tap on a book entry to open it.
 
+## Search bar
+
+The input's text is interpreted as a regular expression, and a book will match if any of its title, subtitle, author, series or file path matches.
+
+One can target specific fields or states using selectors. A selector is a sequence of characters that starts with a single quote and is followed by a letter which represent a field or a state.
+
+### Field selectors
+
+The text that will be searched for is given after the selector.
+
+- *t*: title.
+- *u*: subtitle.
+- *a*: author.
+- *y*: year.
+- *l*: language.
+- *p*: publisher.
+- *s*: series.
+- *e*: edition.
+- *v*: volume.
+- *n*: number.
+
+### State selectors
+
+An exclamation mark can be prepended to a state selector's letter to invert its meaning.
+
+- *R*: reading.
+- *N*: new.
+- *F*: finished.
+- *A*: has annotations.
+- *B*: has bookmarks.
+- *O*: opened after the given date and time.
+- *D*: added after the given date and time.
+
 ## Bottom bar
 
 Tap and hold the next/previous page icon to go the last/first page.
@@ -37,23 +70,23 @@ Tap the library label to bring up the library menu.
 
 ## Viewer
 
-The screen is divided into seven regions:
+The screen is divided into nine regions:
 
 ![Touch Regions](../artworks/touch_regions.svg)
 
 Tap gestures by region:
 
-- *LE* (Left Ear):
+- *WS* (West Strip):
 	- Normal Mode: previous page.
 	- Search Mode: previous results page.
-- *MB* (Middle Band): toggle the top and bottom bars.
-- *RE* (Right Ear):
+- *ES* (East Strip):
 	- Normal Mode: next page.
 	- Search Mode: next results page.
-- *TL* (Top Left Corner): previous location.
-- *TR* (Top Right Corner): toggle bookmark.
-- *BL* (Bottom Left Corner): table of contents in normal mode, previous page in search mode.
-- *BR* (Bottom Right Corner): go to page in normal mode, next page in search mode.
+- *CR* (Center Rectangle), *SS* (South Strip) and *NS* (North Strip): toggle the top and bottom bars.
+- *NWC* (North-West Corner): previous location.
+- *NEC* (North-East Corner): toggle bookmark.
+- *SWC* (South-West Corner): table of contents in normal mode, previous page in search mode.
+- *SEC* (South-East Corner): go to page in normal mode, next page in search mode.
 
 Swipe west/east to go to the next/previous page.
 
@@ -62,6 +95,11 @@ Swipe north/south to scroll the page stream when the zoom mode is fit-to-width.
 Rotate to change the screen orientation (one finger is the center, the other describes the desired rotation with a circular motion around the center: the two fingers should land and take off simultaneously).
 
 Spread (resp. pinch) horizontally to switch the zoom mode to fit-to-width (resp. fit-to-page).
+Spread (resp. pinch) diagonally to zoom in (resp. out) on the current page (the zoom mode is set to *custom*).
+
+When the zoom mode is *custom*:
+- Tapping a peripheral region moves the view port in the corresponding direction.
+- Swiping moves the view port in the swipe's opposite direction.
 
 The following swipe sequences are recognized:
 
@@ -69,11 +107,15 @@ The following swipe sequences are recognized:
 
 - Arrow west/east: go to the previous/next chapter in normal mode, the first/last results in search mode.
 - Arrow north/south: start searching text backward/forward.
-- Top left/right corner: go to the previous/next annotation, highlight or bookmark.
+- Top left/right corner: go to the previous/next bookmark.
+- Top left/right multi-corner: go to the previous/next annotation or highlight.
 - Bottom left corner: guess the frontlight if there's more than two frontlight presets defined, toggle the frontlight otherwise.
 - Bottom right corner: toggle the bitonal mode.
 
-Simultaneously performing an east arrow with the left hand and a west arrow with the right hand will lead you back to the home screen.
+Simultaneous swipe sequences:
+
+- Cross (east arrow with the left hand, west arrow with the right hand): go back to the home screen.
+- Diamond (west arrow with the left hand, east arrow with the right hand): toggle the top and bottom bars.
 
 ### Text Selection
 
@@ -137,6 +179,22 @@ Dictionaries will be searched recursively in the `dictionaries` directory. The s
 You can select the search target by tapping the label in the bottom bar. You can set the input languages of a dictionary by tapping and holding the target's label. You can then provide a comma-separated list of IETF language tags (e.g.: *en, en-US, en-GB*).
 
 You can toggle the fuzzy search mode by tapping the related entry in the search menu (brought up by tapping the search icon). If it's enabled, the headwords that differ only slightly ([Levenshtein distance](https://en.wikipedia.org/wiki/Levenshtein_distance) ≤ 1) from the current query will be considered matches.
+
+## Calculator
+
+*Calculator* is a thin wrapper around [ivy](https://github.com/robpike/ivy), an APL-like calculator.  A keyboard on the bottom accepts input.  Pressing return sends the input to `ivy` and the response is displayed on the screen.
+
+To learn more about how to use `ivy`, type `)help`.  For an introduction, type `)help intro`.  An important point to keep in mind is that all binary operations are right-associative (like in APL or J), so `3*5+7` is parsed as `3*(5+7)` not `(3*5)+7`.
+
+You can back and forth in history by tapping on the buttons to the left and right of the input field respectively.  `ivy`'s output can also be scrolled up or down.
+
+You can adjust the margin and font size by tapping on the buttons in the bottom bar.
+
+Here is an example of `ivy` code showing its conciseness.  The code below appears in one of the Plato screenshots.  It defines a binary operator `lab` that takes two inputs `a` and `b` and displays an `a` by `b` grid of Unicode characters.
+
+```j
+op a lab b = char 9584 + ? a b rho 2
+```
 
 # Input Fields
 

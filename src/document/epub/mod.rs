@@ -5,12 +5,14 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use fxhash::FxHashMap;
 use zip::ZipArchive;
+use percent_encoding::percent_decode_str;
 use anyhow::{Error, format_err};
 use crate::framebuffer::Pixmap;
 use crate::helpers::{Normalize, decode_entities};
 use crate::document::{Document, Location, TextLocation, TocEntry, BoundedText, chapter_from_uri};
 use crate::unit::pt_to_px;
 use crate::geom::{Rectangle, Edge, CycleDir};
+use super::pdf::PdfOpener;
 use super::html::dom::Node;
 use super::html::engine::{Page, Engine, ResourceFetcher};
 use super::html::layout::{StyleData, LoopContext};
@@ -94,7 +96,9 @@ impl EpubDocument {
                 }).and_then(|entry| {
                     entry.attr("href")
                 }).and_then(|href| {
-                    let href_path = parent.join(&href.replace("%20", " ").replace("&amp;", "&"));
+                    let href = decode_entities(href);
+                    let href = percent_decode_str(&href).decode_utf8_lossy();
+                    let href_path = parent.join(href.as_ref());
                     href_path.to_str().and_then(|path| {
                         archive.by_name(path).map_err(|e| {
                             eprintln!("Can't retrieve '{}' from the archive: {}.", path, e)
@@ -198,7 +202,9 @@ impl EpubDocument {
 
                     // Example URI: pr03.html#codecomma_and_what_to_do_with_it
                     let rel_uri = child.find("content").and_then(|content| {
-                        content.attr("src").map(String::from)
+                        content.attr("src")
+                               .map(|src| percent_decode_str(&decode_entities(src)).decode_utf8_lossy()
+                                                                                   .into_owned())
                     }).unwrap_or_default();
 
                     let loc = toc_dir.join(&rel_uri).normalize().to_str()
@@ -534,6 +540,31 @@ impl EpubDocument {
             })
     }
 
+    pub fn cover_image(&self) -> Option<&str> {
+        self.info.find("metadata")
+            .and_then(Node::children)
+            .and_then(|children| children.iter().find(|child| {
+                child.tag_name() == Some("meta") &&
+                child.attr("name") == Some("cover")
+            }))
+            .and_then(|entry| entry.attr("content"))
+            .and_then(|cover_id| {
+                self.info.find("manifest")
+                    .and_then(|entry| entry.find_by_id(cover_id))
+                    .and_then(|entry| entry.attr("href"))
+            })
+            .or_else(|| {
+                self.info.find("manifest")
+                    .and_then(Node::children)
+                    .and_then(|children| children.iter().find(|child| {
+                        (child.attr("href").map_or(false, |hr| hr.contains("cover") || hr.contains("Cover")) ||
+                         child.id().map_or(false, |id| id.contains("cover"))) &&
+                        child.attr("media-type").map_or(false, |mt| mt.starts_with("image/"))
+                    }))
+                    .and_then(|entry| entry.attr("href"))
+            })
+    }
+
     pub fn description(&self) -> Option<String> {
         self.metadata("dc:description")
     }
@@ -552,6 +583,30 @@ impl EpubDocument {
 }
 
 impl Document for EpubDocument {
+    fn preview_pixmap(&mut self, width: f32, height: f32) -> Option<Pixmap> {
+        let opener = PdfOpener::new()?;
+        self.cover_image()
+            .map(|path| self.parent.join(path)
+                            .to_string_lossy().into_owned())
+            .and_then(|path| {
+                self.archive.fetch(&path).ok()
+                    .and_then(|buf| opener.open_memory(&path, &buf))
+                    .and_then(|mut doc| {
+                        doc.dims(0).and_then(|dims| {
+                            let scale = (width / dims.0).min(height / dims.1);
+                            doc.pixmap(Location::Exact(0), scale)
+                        })
+                    })
+            })
+            .or_else(|| {
+                self.dims(0).and_then(|dims| {
+                    let scale = (width / dims.0).min(height / dims.1);
+                    self.pixmap(Location::Exact(0), scale)
+                })
+            })
+            .map(|(pixmap, _)| pixmap)
+    }
+
     #[inline]
     fn dims(&self, _index: usize) -> Option<(f32, f32)> {
         Some((self.engine.dims.0 as f32, self.engine.dims.1 as f32))
@@ -753,7 +808,7 @@ impl Document for EpubDocument {
         })
     }
 
-    fn pixmap(&mut self, loc: Location, _scale: f32) -> Option<(Pixmap, usize)> {
+    fn pixmap(&mut self, loc: Location, scale: f32) -> Option<(Pixmap, usize)> {
         if self.spine.is_empty() {
             return None;
         }
@@ -764,7 +819,7 @@ impl Document for EpubDocument {
         let page_index = self.page_index(offset, index, start_offset)?;
         let page = self.cache.get(&index)?.get(page_index)?.clone();
 
-        let pixmap = self.engine.render_page(&page, &mut self.archive);
+        let pixmap = self.engine.render_page(&page, scale, &mut self.archive);
 
         Some((pixmap, offset))
     }

@@ -5,7 +5,7 @@ mod margin_cropper;
 mod results_label;
 
 use std::thread;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::path::PathBuf;
@@ -18,7 +18,8 @@ use septem::{Roman, Digit};
 use rand_core::RngCore;
 use crate::input::{DeviceEvent, FingerStatus, ButtonCode, ButtonStatus};
 use crate::framebuffer::{Framebuffer, UpdateMode, Pixmap};
-use crate::view::{View, Event, AppCmd, Hub, Bus, ViewId, EntryKind, EntryId, SliderId};
+use crate::view::{View, Event, AppCmd, Hub, Bus, RenderQueue, RenderData};
+use crate::view::{ViewId, Id, ID_FEEDER, EntryKind, EntryId, SliderId};
 use crate::view::{SMALL_BAR_HEIGHT, BIG_BAR_HEIGHT, THICKNESS_MEDIUM};
 use crate::unit::{scale_by_dpi, mm_to_px};
 use crate::device::CURRENT_DEVICE;
@@ -38,17 +39,18 @@ use crate::view::search_bar::SearchBar;
 use crate::view::keyboard::Keyboard;
 use crate::view::menu::{Menu, MenuKind};
 use crate::view::notification::Notification;
-use crate::settings::{guess_frontlight, FinishedAction};
+use crate::settings::{guess_frontlight, FinishedAction, SouthEastCornerAction};
 use crate::settings::{DEFAULT_FONT_FAMILY, DEFAULT_TEXT_ALIGN, DEFAULT_LINE_HEIGHT, DEFAULT_MARGIN_WIDTH};
 use crate::frontlight::LightLevels;
 use crate::gesture::GestureEvent;
 use crate::document::{Document, open, Location, TextLocation, BoundedText, Neighbors, BYTES_PER_PAGE};
-use crate::document::{TocEntry, SimpleTocEntry, TocLocation, toc_as_html, chapter_from_index};
-use crate::document::pdf::PdfOpener;
+use crate::document::{TocEntry, SimpleTocEntry, TocLocation, toc_as_html, annotations_as_html, bookmarks_as_html};
+use crate::document::html::HtmlDocument;
 use crate::metadata::{Info, FileInfo, ReaderInfo, Annotation, TextAlign, ZoomMode, PageScheme};
 use crate::metadata::{Margin, CroppingMargins, make_query};
 use crate::metadata::{DEFAULT_CONTRAST_EXPONENT, DEFAULT_CONTRAST_GRAY};
-use crate::geom::{Point, Rectangle, Boundary, CornerSpec, BorderSpec, Dir, DiagDir, CycleDir, LinearDir, Axis, halves};
+use crate::geom::{Point, Vec2, Rectangle, Boundary, CornerSpec, BorderSpec};
+use crate::geom::{Dir, DiagDir, CycleDir, LinearDir, Axis, Region, halves};
 use crate::color::{BLACK, WHITE};
 use crate::app::Context;
 
@@ -56,15 +58,17 @@ const HISTORY_SIZE: usize = 32;
 const RECT_DIST_JITTER: f32 = 24.0;
 const ANNOTATION_DRIFT: u8 =  0x44;
 const HIGHLIGHT_DRIFT: u8 =  0x22;
+const MEM_SCHEME: &str = "mem:";
 
 pub struct Reader {
+    id: Id,
     rect: Rectangle,
     children: Vec<Box<dyn View>>,
     doc: Arc<Mutex<Box<dyn Document>>>,
-    cache: BTreeMap<usize, Resource>,
-    text: FxHashMap<usize, Vec<BoundedText>>,
-    annotations: FxHashMap<usize, Vec<Annotation>>,
-    chunks: Vec<RenderChunk>,
+    cache: BTreeMap<usize, Resource>,                // Cached page pixmaps.
+    chunks: Vec<RenderChunk>,                        // Chunks of pages being rendered.
+    text: FxHashMap<usize, Vec<BoundedText>>,        // Text of the current chunks.
+    annotations: FxHashMap<usize, Vec<Annotation>>,  // Annotations for the current chunks.
     focus: Option<ViewId>,
     search: Option<Search>,
     search_direction: LinearDir,
@@ -88,7 +92,7 @@ pub struct Reader {
 #[derive(Debug)]
 struct ViewPort {
     zoom_mode: ZoomMode,
-    top_offset: i32,
+    page_offset: Point,   // Offset relative to the top left corner of a resource's frame.
     margin_width: i32,
 }
 
@@ -96,7 +100,7 @@ impl Default for ViewPort {
     fn default() -> Self {
         ViewPort {
             zoom_mode: ZoomMode::FitToPage,
-            top_offset: 0,
+            page_offset: pt!(0, 0),
             margin_width: 0,
         }
     }
@@ -119,14 +123,14 @@ struct Selection {
 #[derive(Debug)]
 struct Resource {
     pixmap: Pixmap,
-    frame: Rectangle,
+    frame: Rectangle,  // The pixmap's rectangle minus the cropping margins.
     scale: f32,
 }
 
 #[derive(Debug, Clone)]
 struct RenderChunk {
     location: usize,
-    frame: Rectangle,
+    frame: Rectangle,  // A subrectangle of the corresponding resource's frame.
     position: Point,
     scale: f32,
 }
@@ -168,6 +172,10 @@ impl Default for Contrast {
 }
 
 fn scaling_factor(rect: &Rectangle, cropping_margin: &Margin, screen_margin_width: i32, dims: (f32, f32), zoom_mode: ZoomMode) -> f32 {
+    if let ZoomMode::Custom(sf) = zoom_mode {
+        return sf;
+    }
+
     let (page_width, page_height) = dims;
     let surface_width = (rect.width() as i32 - 2 * screen_margin_width) as f32;
     let frame_width = (1.0 - (cropping_margin.left + cropping_margin.right)) * page_width;
@@ -180,6 +188,7 @@ fn scaling_factor(rect: &Rectangle, cropping_margin: &Margin, screen_margin_widt
             width_ratio.min(height_ratio)
         },
         ZoomMode::FitToWidth => width_ratio,
+        ZoomMode::Custom(_) => unreachable!(),
     }
 }
 
@@ -213,6 +222,7 @@ fn find_cut(frame: &Rectangle, y_pos: i32, scale: f32, dir: LinearDir, lines: &[
 
 impl Reader {
     pub fn new(rect: Rectangle, mut info: Info, hub: &Hub, context: &mut Context) -> Option<Reader> {
+        let id = ID_FEEDER.next();
         let settings = &context.settings;
         let path = context.library.home.join(&info.file.path);
 
@@ -264,7 +274,7 @@ impl Reader {
                 if r.finished {
                     r.finished = false;
                     r.current_page = first_location;
-                    r.top_offset = None;
+                    r.page_offset = None;
                 }
 
                 current_page = doc.resolve_location(Location::Exact(r.current_page))
@@ -274,8 +284,8 @@ impl Reader {
                     view_port.zoom_mode = zoom_mode;
                 }
 
-                if let Some(top_offset) = r.top_offset {
-                    view_port.top_offset = top_offset;
+                if let Some(page_offset) = r.page_offset {
+                    view_port.page_offset = page_offset;
                 }
 
                 if !doc.is_reflowable() {
@@ -308,6 +318,7 @@ impl Reader {
             hub.send(Event::Update(UpdateMode::Partial)).ok();
 
             Some(Reader {
+                id,
                 rect,
                 children: Vec::new(),
                 doc: Arc::new(Mutex::new(doc)),
@@ -337,35 +348,27 @@ impl Reader {
         })
     }
 
-    pub fn from_toc(rect: Rectangle, toc: &[TocEntry], chap_index: usize, hub: &Hub, context: &mut Context) -> Reader {
-        let html = toc_as_html(toc, chap_index);
+    pub fn from_html(rect: Rectangle, html: &str, link_uri: Option<&str>, hub: &Hub, context: &mut Context) -> Reader {
+        let id = ID_FEEDER.next();
 
-        let info = Info {
-            title: "Table of Contents".to_string(),
+        let mut info = Info {
             file: FileInfo {
-                path: PathBuf::from("toc:"),
+                path: PathBuf::from(MEM_SCHEME),
                 kind: "html".to_string(),
                 size: html.len() as u64,
             },
             .. Default::default()
         };
 
-        let mut opener = PdfOpener::new().unwrap();
-        opener.set_user_css("css/toc.css").unwrap();
-        let mut doc = opener.open_memory("html", html.as_bytes()).unwrap();
+        let mut doc = HtmlDocument::new_from_memory(html);
         let (width, height) = context.display.dims;
         let font_size = context.settings.reader.font_size;
         doc.layout(width, height, font_size, CURRENT_DEVICE.dpi);
         let pages_count = doc.pages_count();
+        info.title = doc.title().unwrap_or_default();
 
         let mut current_page = 0;
-
-        if let Some(chap) = chapter_from_index(chap_index, toc) {
-            let link_uri = match chap.location {
-                Location::Uri(ref uri) => format!("@{}", uri),
-                Location::Exact(offset) => format!("@{}", offset),
-                _ => "#".to_string(),
-            };
+        if let Some(link_uri) = link_uri {
             let mut loc = Location::Exact(0);
             while let Some((links, offset)) = doc.links(loc) {
                 if links.iter().any(|link| link.text == link_uri) {
@@ -379,6 +382,7 @@ impl Reader {
         hub.send(Event::Update(UpdateMode::Partial)).ok();
 
         Reader {
+            id,
             rect,
             children: vec![],
             doc: Arc::new(Mutex::new(Box::new(doc))),
@@ -398,7 +402,7 @@ impl Reader {
             current_page,
             pages_count,
             view_port: ViewPort::default(),
-            synthetic: false,
+            synthetic: true,
             page_turns: 0,
             contrast: Contrast::default(),
             ephemeral: true,
@@ -426,6 +430,12 @@ impl Reader {
                               ((1.0 - cropping_margin.right) * pixmap.width as f32).floor() as i32,
                               ((1.0 - cropping_margin.bottom) * pixmap.height as f32).floor() as i32];
             self.cache.insert(location, Resource { pixmap, frame, scale });
+        } else {
+            let width = (dims.0 as f32 * scale).max(1.0) as u32;
+            let height = (dims.1 as f32 * scale).max(1.0) as u32;
+            let pixmap = Pixmap::new(width, height);
+            let frame = pixmap.rect();
+            self.cache.insert(location, Resource { pixmap, frame, scale });
         }
     }
 
@@ -442,7 +452,7 @@ impl Reader {
         self.text.insert(location, words);
     }
 
-    fn go_to_page(&mut self, location: usize, record: bool, hub: &Hub, context: &Context) {
+    fn go_to_page(&mut self, location: usize, record: bool, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         let loc = {
             let mut doc = self.doc.lock().unwrap();
             doc.resolve_location(Location::Exact(location))
@@ -460,18 +470,18 @@ impl Reader {
                 s.current_page = s.highlights.range(..=location).count().saturating_sub(1);
             }
 
-            self.view_port.top_offset = 0;
+            self.view_port.page_offset = pt!(0);
             self.current_page = location;
-            self.update(None, hub, context);
-            self.update_bottom_bar(hub);
+            self.update(None, hub, rq, context);
+            self.update_bottom_bar(rq);
 
             if self.search.is_some() {
-                self.update_results_bar(hub);
+                self.update_results_bar(rq);
             }
         }
     }
 
-    fn go_to_chapter(&mut self, dir: CycleDir, hub: &Hub, context: &Context) {
+    fn go_to_chapter(&mut self, dir: CycleDir, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         let current_page = self.current_page;
         let loc = {
             let mut doc = self.doc.lock().unwrap();
@@ -492,7 +502,7 @@ impl Reader {
             }
         };
         if let Some(location) = loc {
-            self.go_to_page(location, true, hub, context);
+            self.go_to_page(location, true, hub, rq, context);
         }
     }
 
@@ -524,70 +534,66 @@ impl Reader {
         min_loc.and_then(|min| max_loc.map(|max| [min, max]))
     }
 
-    fn go_to_artefact(&mut self, dir: CycleDir, hub: &Hub, context: &Context) {
-        let mut loc_bkm = None;
-        let mut loc_annot = None;
-
-        if let Some(ref r) = self.info.reader {
+    fn go_to_bookmark(&mut self, dir: CycleDir, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
+        let loc_bkm = self.info.reader.as_ref().and_then(|r| {
             match dir {
-                CycleDir::Next => {
-                    loc_bkm = r.bookmarks.range(self.current_page+1 ..)
-                                         .next().cloned();
-                    if let Some([_, max]) = self.text_location_range() {
-                        loc_annot = r.annotations.iter()
-                                     .filter(|annot| annot.selection[0] > max)
-                                     .map(|annot| annot.selection[0]).min()
-                                     .map(|tl| tl.location());
-                    }
-                },
-                CycleDir::Previous => {
-                    loc_bkm = r.bookmarks.range(.. self.current_page)
-                                         .next_back().cloned();
-                    if let Some([min, _]) = self.text_location_range() {
-                        loc_annot = r.annotations.iter()
-                                     .filter(|annot| annot.selection[1] < min)
-                                     .map(|annot| annot.selection[1]).max()
-                                     .map(|tl| tl.location());
-                    }
-                },
+                CycleDir::Next => r.bookmarks.range(self.current_page+1 ..)
+                                   .next().cloned(),
+                CycleDir::Previous => r.bookmarks.range(.. self.current_page)
+                                       .next_back().cloned(),
             }
-        }
+        });
 
-        let loc = match (loc_bkm, loc_annot) {
-            (Some(a), Some(b)) => {
-                if dir == CycleDir::Next {
-                    Some(a.min(b))
-                } else {
-                    Some(a.max(b))
-                }
-            },
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-
-        if let Some(location) = loc {
-            self.go_to_page(location, true, hub, context);
+        if let Some(location) = loc_bkm {
+            self.go_to_page(location, true, hub, rq, context);
         }
     }
 
-    fn go_to_last_page(&mut self, hub: &Hub, context: &Context) {
+    fn go_to_annotation(&mut self, dir: CycleDir, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
+        let loc_annot = self.info.reader.as_ref().and_then(|r| {
+            match dir {
+                CycleDir::Next => self.text_location_range().and_then(|[_, max]| {
+                    r.annotations.iter()
+                     .filter(|annot| annot.selection[0] > max)
+                     .map(|annot| annot.selection[0]).min()
+                     .map(|tl| tl.location())
+                }),
+                CycleDir::Previous => self.text_location_range().and_then(|[min, _]| {
+                    r.annotations.iter()
+                     .filter(|annot| annot.selection[1] < min)
+                     .map(|annot| annot.selection[1]).max()
+                     .map(|tl| tl.location())
+                }),
+            }
+        });
+
+        if let Some(location) = loc_annot {
+            self.go_to_page(location, true, hub, rq, context);
+        }
+    }
+
+    fn go_to_last_page(&mut self, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         if let Some(location) = self.history.pop_back() {
-            self.go_to_page(location, false, hub, context);
+            self.go_to_page(location, false, hub, rq, context);
         }
     }
 
-    fn page_scroll(&mut self, delta_y: i32, hub: &Hub, context: &mut Context) {
-        if delta_y == 0 {
+    fn page_scroll(&mut self, delta_y: i32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+        if delta_y == 0 || self.view_port.zoom_mode == ZoomMode::FitToPage || self.cache.is_empty() {
             return;
         }
 
-        let mut next_top_offset = self.view_port.top_offset - delta_y;
+        let mut next_top_offset = self.view_port.page_offset.y + delta_y;
         let mut location = self.current_page;
+
         let max_top_offset = self.cache[&location].frame.height().saturating_sub(1) as i32;
+
         if next_top_offset < 0 {
             let mut doc = self.doc.lock().unwrap();
             if let Some(previous_location) = doc.resolve_location(Location::Previous(location)) {
+                if !self.cache.contains_key(&previous_location) {
+                    return;
+                }
                 location = previous_location;
                 let frame = self.cache[&location].frame;
                 next_top_offset = (frame.height() as i32 + next_top_offset).max(0);
@@ -597,6 +603,9 @@ impl Reader {
         } else if next_top_offset > max_top_offset {
             let mut doc = self.doc.lock().unwrap();
             if let Some(next_location) = doc.resolve_location(Location::Next(location)) {
+                if !self.cache.contains_key(&next_location) {
+                    return;
+                }
                 location = next_location;
                 let frame = self.cache[&location].frame;
                 let mto = frame.height().saturating_sub(1) as i32;
@@ -619,28 +628,49 @@ impl Reader {
         }
 
         let location_changed = location != self.current_page;
-        if !location_changed && next_top_offset == self.view_port.top_offset {
+        if !location_changed && next_top_offset == self.view_port.page_offset.y {
             return;
         }
 
-        self.view_port.top_offset = next_top_offset;
+        self.view_port.page_offset.y = next_top_offset;
         self.current_page = location;
-        self.update(None, hub, context);
+        self.update(None, hub, rq, context);
 
         if location_changed {
             if let Some(ref mut s) = self.search {
                 s.current_page = s.highlights.range(..=location).count().saturating_sub(1);
             }
-            self.update_bottom_bar(hub);
+            self.update_bottom_bar(rq);
             if self.search.is_some() {
-                self.update_results_bar(hub);
+                self.update_results_bar(rq);
             }
         }
     }
 
-    fn go_to_neighbor(&mut self, dir: CycleDir, hub: &Hub, context: &mut Context) {
+    fn screen_scroll(&mut self, delta: Point, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+        if delta == pt!(0) || self.cache.is_empty() {
+            return;
+        }
+
+        let Resource { frame, .. } = self.cache[&self.current_page];
+        let next_page_offset = self.view_port.page_offset + delta;
+        let vpw = self.rect.width() as i32 - 2 * self.view_port.margin_width;
+        let vph = self.rect.height() as i32 - 2 * self.view_port.margin_width;
+        let vprect = rect![pt!(0), pt!(vpw, vph)] + next_page_offset + frame.min;
+
+        if vprect.overlaps(&frame) {
+            self.view_port.page_offset = next_page_offset;
+            self.update(None, hub, rq, context);
+        }
+    }
+
+    fn go_to_neighbor(&mut self, dir: CycleDir, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+        if self.chunks.is_empty() {
+            return;
+        }
+
         let current_page = self.current_page;
-        let top_offset = self.view_port.top_offset;
+        let page_offset = self.view_port.page_offset;
 
         let loc = {
             let neighloc = if dir == CycleDir::Previous {
@@ -684,24 +714,34 @@ impl Reader {
                             }
                         }
 
-                        self.view_port.top_offset = next_top_offset;
+                        self.view_port.page_offset.y = next_top_offset;
                         Location::Exact(location)
+                    },
+                    ZoomMode::Custom(_) => {
+                        self.view_port.page_offset = pt!(0);
+                        Location::Previous(current_page)
                     },
                 }
             } else {
                 match self.view_port.zoom_mode {
                     ZoomMode::FitToPage => Location::Next(current_page),
                     ZoomMode::FitToWidth => {
-                        let last_chunk = self.chunks.last().unwrap();
-                        let pixmap_frame = self.cache[&last_chunk.location].frame;
-                        let next_top_offset = last_chunk.frame.max.y - pixmap_frame.min.y;
+                        let &RenderChunk { location, frame, .. } = self.chunks.last().unwrap();
+                        self.load_pixmap(location);
+                        self.load_text(location);
+                        let pixmap_frame = self.cache[&location].frame;
+                        let next_top_offset = frame.max.y - pixmap_frame.min.y;
                         if next_top_offset == pixmap_frame.height() as i32 {
-                            self.view_port.top_offset = 0;
-                            Location::Next(last_chunk.location)
+                            self.view_port.page_offset.y = 0;
+                            Location::Next(location)
                         } else {
-                            self.view_port.top_offset = next_top_offset;
-                            Location::Exact(last_chunk.location)
+                            self.view_port.page_offset.y = next_top_offset;
+                            Location::Exact(location)
                         }
+                    },
+                    ZoomMode::Custom(_) => {
+                        self.view_port.page_offset = pt!(0);
+                        Location::Next(current_page)
                     },
                 }
             };
@@ -709,17 +749,17 @@ impl Reader {
             doc.resolve_location(neighloc)
         };
         match loc {
-            Some(location) if location != current_page || self.view_port.top_offset != top_offset => {
+            Some(location) if location != current_page || self.view_port.page_offset != page_offset => {
                 if let Some(ref mut s) = self.search {
                     s.current_page = s.highlights.range(..=location).count().saturating_sub(1);
                 }
 
                 self.current_page = location;
-                self.update(None, hub, context);
-                self.update_bottom_bar(hub);
+                self.update(None, hub, rq, context);
+                self.update_bottom_bar(rq);
 
                 if self.search.is_some() {
-                    self.update_results_bar(hub);
+                    self.update_results_bar(rq);
                 }
             },
             _ => {
@@ -736,6 +776,7 @@ impl Reader {
                                 let notif = Notification::new(ViewId::BoundaryNotif,
                                                               "No next page.".to_string(),
                                                               hub,
+                                                              rq,
                                                               context);
                                 self.children.push(Box::new(notif) as Box<dyn View>);
                             },
@@ -749,6 +790,7 @@ impl Reader {
                         let notif = Notification::new(ViewId::BoundaryNotif,
                                                       "No previous page.".to_string(),
                                                       hub,
+                                                      rq,
                                                       context);
                         self.children.push(Box::new(notif) as Box<dyn View>);
                     },
@@ -757,7 +799,7 @@ impl Reader {
         }
     }
 
-    fn go_to_results_page(&mut self, index: usize, hub: &Hub, context: &Context) {
+    fn go_to_results_page(&mut self, index: usize, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         let mut loc = None;
         if let Some(ref mut s) = self.search {
             if index < s.highlights.len() {
@@ -766,15 +808,15 @@ impl Reader {
             }
         }
         if let Some(location) = loc {
-            self.view_port.top_offset = 0;
+            self.view_port.page_offset = pt!(0, 0);
             self.current_page = location;
-            self.update_results_bar(hub);
-            self.update_bottom_bar(hub);
-            self.update(None, hub, context);
+            self.update_results_bar(rq);
+            self.update_bottom_bar(rq);
+            self.update(None, hub, rq, context);
         }
     }
 
-    fn go_to_results_neighbor(&mut self, dir: CycleDir, hub: &Hub, context: &Context) {
+    fn go_to_results_neighbor(&mut self, dir: CycleDir, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         let loc = self.search.as_ref().and_then(|s| {
             match dir {
                 CycleDir::Next => s.highlights.range(self.current_page+1..)
@@ -787,15 +829,15 @@ impl Reader {
             if let Some(ref mut s) = self.search {
                 s.current_page = s.highlights.range(..=location).count().saturating_sub(1);
             }
-            self.view_port.top_offset = 0;
+            self.view_port.page_offset = pt!(0, 0);
             self.current_page = location;
-            self.update_results_bar(hub);
-            self.update_bottom_bar(hub);
-            self.update(None, hub, context);
+            self.update_results_bar(rq);
+            self.update_bottom_bar(rq);
+            self.update(None, hub, rq, context);
         }
     }
 
-    fn update_bottom_bar(&mut self, hub: &Hub) {
+    fn update_bottom_bar(&mut self, rq: &mut RenderQueue) {
         if let Some(index) = locate::<BottomBar>(self) {
             let current_page = self.current_page;
             let mut doc = self.doc.lock().unwrap();
@@ -808,13 +850,13 @@ impl Reader {
                 previous_page: doc.resolve_location(Location::Previous(current_page)),
                 next_page: doc.resolve_location(Location::Next(current_page)),
             };
-            bottom_bar.update_page_label(self.current_page, self.pages_count, hub);
-            bottom_bar.update_icons(&neighbors, hub);
-            bottom_bar.update_chapter(&chapter, hub);
+            bottom_bar.update_page_label(self.current_page, self.pages_count, rq);
+            bottom_bar.update_icons(&neighbors, rq);
+            bottom_bar.update_chapter(&chapter, rq);
         }
     }
 
-    fn update_tool_bar(&mut self, hub: &Hub, context: &mut Context) {
+    fn update_tool_bar(&mut self, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<ToolBar>(self) {
             let tool_bar = self.children[index].as_mut().downcast_mut::<ToolBar>().unwrap();
             let settings = &context.settings;
@@ -822,32 +864,32 @@ impl Reader {
                 let font_family = self.info.reader.as_ref()
                                       .and_then(|r| r.font_family.clone())
                                       .unwrap_or_else(|| settings.reader.font_family.clone());
-                tool_bar.update_font_family(font_family, hub);
+                tool_bar.update_font_family(font_family, rq);
                 let font_size = self.info.reader.as_ref()
                                     .and_then(|r| r.font_size)
                                     .unwrap_or(settings.reader.font_size);
-                tool_bar.update_font_size_slider(font_size, hub);
+                tool_bar.update_font_size_slider(font_size, rq);
                 let text_align = self.info.reader.as_ref()
                                     .and_then(|r| r.text_align)
                                     .unwrap_or(settings.reader.text_align);
-                tool_bar.update_text_align_icon(text_align, hub);
+                tool_bar.update_text_align_icon(text_align, rq);
                 let line_height = self.info.reader.as_ref()
                                       .and_then(|r| r.line_height)
                                       .unwrap_or(settings.reader.line_height);
-                tool_bar.update_line_height(line_height, hub);
+                tool_bar.update_line_height(line_height, rq);
             } else {
-                tool_bar.update_contrast_exponent_slider(self.contrast.exponent, hub);
-                tool_bar.update_contrast_gray_slider(self.contrast.gray, hub);
+                tool_bar.update_contrast_exponent_slider(self.contrast.exponent, rq);
+                tool_bar.update_contrast_gray_slider(self.contrast.gray, rq);
             }
             let reflowable = self.reflowable;
             let margin_width = self.info.reader.as_ref()
                                    .and_then(|r| if reflowable { r.margin_width } else { r.screen_margin_width })
                                    .unwrap_or_else(|| if reflowable { settings.reader.margin_width } else { 0 });
-            tool_bar.update_margin_width(margin_width, hub);
+            tool_bar.update_margin_width(margin_width, rq);
         }
     }
 
-    fn update_results_bar(&mut self, hub: &Hub) {
+    fn update_results_bar(&mut self, rq: &mut RenderQueue) {
         if self.search.is_none() {
             return;
         }
@@ -857,9 +899,9 @@ impl Reader {
         };
         if let Some(index) = locate::<ResultsBar>(self) {
             let results_bar = self.child_mut(index).downcast_mut::<ResultsBar>().unwrap();
-            results_bar.update_results_label(count, hub);
-            results_bar.update_page_label(current_page, pages_count, hub);
-            results_bar.update_icons(current_page, pages_count, hub);
+            results_bar.update_results_label(count, rq);
+            results_bar.update_page_label(current_page, pages_count, rq);
+            results_bar.update_icons(current_page, pages_count, rq);
         }
     }
 
@@ -885,7 +927,7 @@ impl Reader {
         }
     }
 
-    fn update(&mut self, update_mode: Option<UpdateMode>, hub: &Hub, context: &Context) {
+    fn update(&mut self, update_mode: Option<UpdateMode>, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         self.page_turns += 1;
         let update_mode = update_mode.unwrap_or_else(|| {
             let refresh_rate = if context.fb.inverted() {
@@ -921,7 +963,7 @@ impl Reader {
                     self.load_text(location);
                     let Resource { mut frame, scale, .. } = self.cache[&location];
                     if location == self.current_page {
-                        frame.min.y += self.view_port.top_offset;
+                        frame.min.y += self.view_port.page_offset.y;
                     }
                     let position = pt!(smw, smw + height);
                     self.chunks.push(RenderChunk { frame, location, position, scale });
@@ -953,9 +995,21 @@ impl Reader {
                     }
                 }
             },
+            ZoomMode::Custom(_) => {
+                self.load_pixmap(location);
+                self.load_text(location);
+                let Resource { frame, scale, .. } = self.cache[&location];
+                let vpw = self.rect.width() as i32 - 2 * smw;
+                let vph = self.rect.height() as i32 - 2 * smw;
+                let vpr = rect![pt!(0), pt!(vpw, vph)] + self.view_port.page_offset + frame.min;
+                if let Some(rect) = frame.intersection(&vpr) {
+                    let position = pt!(smw) + rect.min - vpr.min;
+                    self.chunks.push(RenderChunk { frame: rect, location, position, scale });
+                }
+            },
         }
 
-        hub.send(Event::Render(self.rect, update_mode)).ok();
+        rq.add(RenderData::new(self.id, self.rect, update_mode));
         let first_location = self.chunks.first().map(|c| c.location).unwrap();
         let last_location = self.chunks.last().map(|c| c.location).unwrap();
 
@@ -972,25 +1026,28 @@ impl Reader {
 
         self.update_annotations();
 
-        let doc2 = self.doc.clone();
-        let hub2 = hub.clone();
-        thread::spawn(move || {
-            let mut doc = doc2.lock().unwrap();
-            if let Some(next_location) = doc.resolve_location(Location::Next(last_location)) {
-                hub2.send(Event::LoadPixmap(next_location)).ok();
-            }
-        });
-        let doc3 = self.doc.clone();
-        let hub3 = hub.clone();
-        thread::spawn(move || {
-            let mut doc = doc3.lock().unwrap();
-            if let Some(previous_location) = doc.resolve_location(Location::Previous(first_location)) {
-                hub3.send(Event::LoadPixmap(previous_location)).ok();
-            }
-        });
+        if self.view_port.zoom_mode == ZoomMode::FitToPage ||
+           self.view_port.zoom_mode == ZoomMode::FitToWidth {
+            let doc2 = self.doc.clone();
+            let hub2 = hub.clone();
+            thread::spawn(move || {
+                let mut doc = doc2.lock().unwrap();
+                if let Some(next_location) = doc.resolve_location(Location::Next(last_location)) {
+                    hub2.send(Event::LoadPixmap(next_location)).ok();
+                }
+            });
+            let doc3 = self.doc.clone();
+            let hub3 = hub.clone();
+            thread::spawn(move || {
+                let mut doc = doc3.lock().unwrap();
+                if let Some(previous_location) = doc.resolve_location(Location::Previous(first_location)) {
+                    hub3.send(Event::LoadPixmap(previous_location)).ok();
+                }
+            });
+        }
     }
 
-    fn search(&mut self, text: &str, query: Regex, hub: &Hub) {
+    fn search(&mut self, text: &str, query: Regex, hub: &Hub, rq: &mut RenderQueue) {
         let s = Search {
             query: text.to_string(),
             .. Default::default()
@@ -1061,13 +1118,13 @@ impl Reader {
         });
 
         if self.search.is_some() {
-            self.render_results(hub);
+            self.render_results(rq);
         }
 
         self.search = Some(s);
     }
 
-    fn toggle_keyboard(&mut self, enable: bool, id: Option<ViewId>, hub: &Hub, context: &mut Context) {
+    fn toggle_keyboard(&mut self, enable: bool, id: Option<ViewId>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<Keyboard>(self) {
             if enable {
                 return;
@@ -1079,7 +1136,7 @@ impl Reader {
             if index == 1 {
                 rect.absorb(self.child(index+1).rect());
                 self.children.drain(index - 1 ..= index + 1);
-                hub.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::expose(rect, UpdateMode::Gui));
             } else {
                 self.children.drain(index - 1 ..= index);
 
@@ -1089,12 +1146,12 @@ impl Reader {
 
                 for i in start_index..index-1 {
                     let shifted_rect = *self.child(i).rect() + pt!(0, delta_y);
-                    self.child_mut(i).resize(shifted_rect, hub, context);
-                    hub.send(Event::Render(shifted_rect, UpdateMode::Gui)).ok();
+                    self.child_mut(i).resize(shifted_rect, hub, rq, context);
+                    rq.add(RenderData::new(self.child(i).id(), shifted_rect, UpdateMode::Gui));
                 }
 
                 let rect = rect![self.rect.min.x, y_min, self.rect.max.x, y_min + delta_y];
-                hub.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::expose(rect, UpdateMode::Gui));
             }
 
             hub.send(Event::Focus(None)).ok();
@@ -1140,11 +1197,11 @@ impl Reader {
 
             if index == 0 {
                 for i in index..index+3 {
-                    hub.send(Event::Render(*self.child(i).rect(), UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.child(i).id(), *self.child(i).rect(), UpdateMode::Gui));
                 }
             } else {
                 for i in index..index+2 {
-                    hub.send(Event::Render(*self.child(i).rect(), UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.child(i).id(), *self.child(i).rect(), UpdateMode::Gui));
                 }
 
                 let delta_y = kb_rect.height() as i32 + thickness;
@@ -1152,14 +1209,14 @@ impl Reader {
 
                 for i in start_index..index {
                     let shifted_rect = *self.child(i).rect() + pt!(0, -delta_y);
-                    self.child_mut(i).resize(shifted_rect, hub, context);
-                    hub.send(Event::Render(shifted_rect, UpdateMode::Gui)).ok();
+                    self.child_mut(i).resize(shifted_rect, hub, rq, context);
+                    rq.add(RenderData::new(self.child(i).id(), shifted_rect, UpdateMode::Gui));
                 }
             }
         }
     }
 
-    fn toggle_tool_bar(&mut self, enable: bool, hub: &Hub, context: &mut Context) {
+    fn toggle_tool_bar(&mut self, enable: bool, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<ToolBar>(self) {
             if enable {
                 return;
@@ -1168,7 +1225,7 @@ impl Reader {
             let mut rect = *self.child(index).rect();
             rect.absorb(self.child(index - 1).rect());
             self.children.drain(index - 1 ..= index);
-            hub.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(rect, UpdateMode::Gui));
         } else {
             if !enable {
                 return;
@@ -1194,7 +1251,7 @@ impl Reader {
         }
     }
 
-    fn toggle_results_bar(&mut self, enable: bool, hub: &Hub, _context: &mut Context) {
+    fn toggle_results_bar(&mut self, enable: bool, rq: &mut RenderQueue, _context: &mut Context) {
         if let Some(index) = locate::<ResultsBar>(self) {
             if enable {
                 return;
@@ -1203,7 +1260,7 @@ impl Reader {
             let mut rect = *self.child(index).rect();
             rect.absorb(self.child(index - 1).rect());
             self.children.drain(index - 1 ..= index);
-            hub.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(rect, UpdateMode::Gui));
         } else {
             if !enable {
                 return;
@@ -1227,36 +1284,36 @@ impl Reader {
                 let separator = Filler::new(sp_rect, BLACK);
                 self.children.insert(index, Box::new(separator) as Box<dyn View>);
                 rect.absorb(&sp_rect);
-                hub.send(Event::Render(rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
             }
         }
     }
 
-    fn toggle_search_bar(&mut self, enable: bool, hub: &Hub, context: &mut Context) {
+    fn toggle_search_bar(&mut self, enable: bool, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<SearchBar>(self) {
             if enable {
                 return;
             }
 
             if let Some(ViewId::ReaderSearchInput) = self.focus {
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
             }
 
             if self.child(0).is::<TopBar>() {
-                self.toggle_bars(Some(false), hub, context);
+                self.toggle_bars(Some(false), hub, rq, context);
             } else {
                 let mut rect = *self.child(index).rect();
                 rect.absorb(self.child(index-1).rect());
                 rect.absorb(self.child(index+1).rect());
                 self.children.drain(index - 1 ..= index + 1);
-                hub.send(Event::Expose(rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::expose(rect, UpdateMode::Gui));
             }
         } else {
             if !enable {
                 return;
             }
 
-            self.toggle_tool_bar(false, hub, context);
+            self.toggle_tool_bar(false, rq, context);
 
             let dpi = CURRENT_DEVICE.dpi;
             let thickness = scale_by_dpi(THICKNESS_MEDIUM, dpi) as i32;
@@ -1282,18 +1339,19 @@ impl Reader {
             let separator = Filler::new(sp_rect, BLACK);
             self.children.insert(index, Box::new(separator) as Box<dyn View>);
 
-            hub.send(Event::Render(*self.child(index).rect(), UpdateMode::Gui)).ok();
-            hub.send(Event::Render(*self.child(index+1).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(self.child(index).id(), *self.child(index).rect(), UpdateMode::Gui));
+            rq.add(RenderData::new(self.child(index+1).id(), *self.child(index+1).rect(), UpdateMode::Gui));
 
             if index == 0 {
-                hub.send(Event::Render(*self.child(index+2).rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.child(index+2).id(), *self.child(index+2).rect(), UpdateMode::Gui));
             }
 
+            self.toggle_keyboard(true, Some(ViewId::ReaderSearchInput), hub, rq, context);
             hub.send(Event::Focus(Some(ViewId::ReaderSearchInput))).ok();
         }
     }
 
-    fn toggle_bars(&mut self, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_bars(&mut self, enable: Option<bool>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(top_index) = locate::<TopBar>(self) {
             if let Some(true) = enable {
                 return;
@@ -1309,8 +1367,8 @@ impl Reader {
 
                 self.children.drain(top_index..=bottom_index);
 
-                hub.send(Event::Expose(top_rect, UpdateMode::Gui)).ok();
-                hub.send(Event::Expose(bottom_rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::expose(top_rect, UpdateMode::Gui));
+                rq.add(RenderData::expose(bottom_rect, UpdateMode::Gui));
                 hub.send(Event::Focus(None)).ok();
             }
         } else {
@@ -1431,25 +1489,25 @@ impl Reader {
             self.children.insert(index, Box::new(bottom_bar) as Box<dyn View>);
 
             for i in 0..=index {
-                hub.send(Event::Render(*self.child(i).rect(), UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.child(i).id(), *self.child(i).rect(), UpdateMode::Gui));
             }
         }
     }
 
-    fn toggle_margin_cropper(&mut self, enable: bool, hub: &Hub, context: &mut Context) {
+    fn toggle_margin_cropper(&mut self, enable: bool, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<MarginCropper>(self) {
             if enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if !enable {
                 return;
             }
 
-            self.toggle_bars(Some(false), hub, context);
+            self.toggle_bars(Some(false), hub, rq, context);
 
             let dpi = CURRENT_DEVICE.dpi;
             let padding = scale_by_dpi(BUTTON_DIAMETER / 2.0, dpi) as i32;
@@ -1465,22 +1523,22 @@ impl Reader {
             let (pixmap, _) = build_pixmap(&pixmap_rect, doc.as_mut(), self.current_page);
 
             let margin_cropper = MarginCropper::new(self.rect, pixmap, &margin, context);
-            hub.send(Event::Render(*margin_cropper.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(margin_cropper.id(), *margin_cropper.rect(), UpdateMode::Gui));
             self.children.push(Box::new(margin_cropper) as Box<dyn View>);
         }
     }
 
-    fn toggle_edit_note(&mut self, text: Option<String>, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_edit_note(&mut self, text: Option<String>, enable: Option<bool>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::EditNote) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
 
             if self.focus.map(|focus_id| focus_id == ViewId::EditNoteInput).unwrap_or(false) {
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
             }
         } else {
             if let Some(false) = enable {
@@ -1489,28 +1547,27 @@ impl Reader {
 
             let mut edit_note = NamedInput::new("Note".to_string(), ViewId::EditNote, ViewId::EditNoteInput, 32, context);
             if let Some(text) = text.as_ref() {
-                let (tx, _rx) = mpsc::channel();
-                edit_note.set_text(text, &tx, context);
+                edit_note.set_text(text, &mut RenderQueue::new(), context);
             }
 
-            hub.send(Event::Render(*edit_note.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(edit_note.id(), *edit_note.rect(), UpdateMode::Gui));
             hub.send(Event::Focus(Some(ViewId::EditNoteInput))).ok();
 
             self.children.push(Box::new(edit_note) as Box<dyn View>);
         }
     }
 
-    fn toggle_name_page(&mut self, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_name_page(&mut self, enable: Option<bool>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::NamePage) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
 
             if self.focus.map(|focus_id| focus_id == ViewId::NamePageInput).unwrap_or(false) {
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
             }
         } else {
             if let Some(false) = enable {
@@ -1518,14 +1575,14 @@ impl Reader {
             }
 
             let name_page = NamedInput::new("Name page".to_string(), ViewId::NamePage, ViewId::NamePageInput, 4, context);
-            hub.send(Event::Render(*name_page.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(name_page.id(), *name_page.rect(), UpdateMode::Gui));
             hub.send(Event::Focus(Some(ViewId::NamePageInput))).ok();
 
             self.children.push(Box::new(name_page) as Box<dyn View>);
         }
     }
 
-    fn toggle_go_to_page(&mut self, enable: Option<bool>, id: ViewId, hub: &Hub, context: &mut Context) {
+    fn toggle_go_to_page(&mut self, enable: Option<bool>, id: ViewId, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         let (text, input_id) = if id == ViewId::GoToPage {
             ("Go to page", ViewId::GoToPageInput)
         } else {
@@ -1537,11 +1594,11 @@ impl Reader {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
 
             if self.focus.map(|focus_id| focus_id == input_id).unwrap_or(false) {
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
             }
         } else {
             if let Some(false) = enable {
@@ -1549,20 +1606,20 @@ impl Reader {
             }
 
             let go_to_page = NamedInput::new(text.to_string(), id, input_id, 4, context);
-            hub.send(Event::Render(*go_to_page.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(go_to_page.id(), *go_to_page.rect(), UpdateMode::Gui));
             hub.send(Event::Focus(Some(input_id))).ok();
 
             self.children.push(Box::new(go_to_page) as Box<dyn View>);
         }
     }
 
-    pub fn toggle_annotation_menu(&mut self, annot: &Annotation, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    pub fn toggle_annotation_menu(&mut self, annot: &Annotation, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::AnnotationMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1584,18 +1641,18 @@ impl Reader {
             }
 
             let selection_menu = Menu::new(rect, ViewId::AnnotationMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*selection_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(selection_menu.id(), *selection_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(selection_menu) as Box<dyn View>);
         }
     }
 
-    pub fn toggle_selection_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    pub fn toggle_selection_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::SelectionMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1618,50 +1675,68 @@ impl Reader {
             entries.push(EntryKind::Command("Adjust Selection".to_string(), EntryId::AdjustSelection));
 
             let selection_menu = Menu::new(rect, ViewId::SelectionMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*selection_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(selection_menu.id(), *selection_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(selection_menu) as Box<dyn View>);
         }
     }
 
-    pub fn toggle_title_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    pub fn toggle_title_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::TitleMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
                 return;
             }
 
-            if self.reflowable {
-                return;
+            let mut entries = if self.reflowable {
+                if self.ephemeral {
+                    vec![EntryKind::Command("Save".to_string(), EntryId::Save)]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                let zoom_mode = self.view_port.zoom_mode;
+                let sf = if let ZoomMode::Custom(sf) = zoom_mode { sf } else { 1.0 };
+                vec![EntryKind::SubMenu("Zoom Mode".to_string(), vec![
+                     EntryKind::RadioButton("Fit to Page".to_string(),
+                                            EntryId::SetZoomMode(ZoomMode::FitToPage),
+                                            zoom_mode == ZoomMode::FitToPage),
+                     EntryKind::RadioButton("Fit to Width".to_string(),
+                                            EntryId::SetZoomMode(ZoomMode::FitToWidth),
+                                            zoom_mode == ZoomMode::FitToWidth),
+                     EntryKind::RadioButton(format!("Custom ({:.1}%)", 100.0 * sf),
+                                            EntryId::SetZoomMode(ZoomMode::Custom(sf)),
+                                            zoom_mode == ZoomMode::Custom(sf))])]
+            };
+
+            if self.info.reader.as_ref().map_or(false, |r| !r.annotations.is_empty()) {
+                entries.push(EntryKind::Command("Annotations".to_string(), EntryId::Annotations));
             }
 
-            let zoom_mode = self.view_port.zoom_mode;
-            let entries = vec![EntryKind::SubMenu("Zoom Mode".to_string(), vec![
-                               EntryKind::RadioButton("Fit to Page".to_string(),
-                                                      EntryId::SetZoomMode(ZoomMode::FitToPage),
-                                                      zoom_mode == ZoomMode::FitToPage),
-                               EntryKind::RadioButton("Fit to Width".to_string(),
-                                                      EntryId::SetZoomMode(ZoomMode::FitToWidth),
-                                                      zoom_mode == ZoomMode::FitToWidth)])];
-            let title_menu = Menu::new(rect, ViewId::TitleMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*title_menu.rect(), UpdateMode::Gui)).ok();
-            self.children.push(Box::new(title_menu) as Box<dyn View>);
+            if self.info.reader.as_ref().map_or(false, |r| !r.bookmarks.is_empty()) {
+                entries.push(EntryKind::Command("Bookmarks".to_string(), EntryId::Bookmarks));
+            }
+
+            if !entries.is_empty() {
+                let title_menu = Menu::new(rect, ViewId::TitleMenu, MenuKind::DropDown, entries, context);
+                rq.add(RenderData::new(title_menu.id(), *title_menu.rect(), UpdateMode::Gui));
+                self.children.push(Box::new(title_menu) as Box<dyn View>);
+            }
         }
     }
 
-
-    fn toggle_font_family_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_font_family_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::FontFamilyMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1679,18 +1754,18 @@ impl Reader {
                                                                          EntryId::SetFontFamily(f.clone()),
                                                                          *f == current_family)).collect();
             let font_family_menu = Menu::new(rect, ViewId::FontFamilyMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*font_family_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(font_family_menu.id(), *font_family_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(font_family_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_font_size_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_font_size_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::FontSizeMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1712,18 +1787,18 @@ impl Reader {
                 }
             }).collect();
             let font_size_menu = Menu::new(rect, ViewId::FontSizeMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*font_size_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(font_size_menu.id(), *font_size_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(font_size_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_text_align_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_text_align_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::TextAlignMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1739,18 +1814,18 @@ impl Reader {
                                        text_align == *v)
             }).collect();
             let text_align_menu = Menu::new(rect, ViewId::TextAlignMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*text_align_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(text_align_menu.id(), *text_align_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(text_align_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_line_height_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_line_height_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::LineHeightMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1766,18 +1841,18 @@ impl Reader {
                                        (lh - line_height).abs() < 0.05)
             }).collect();
             let line_height_menu = Menu::new(rect, ViewId::LineHeightMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*line_height_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(line_height_menu.id(), *line_height_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(line_height_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_contrast_exponent_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_contrast_exponent_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::ContrastExponentMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1791,18 +1866,18 @@ impl Reader {
                                        (e - self.contrast.exponent).abs() < f32::EPSILON)
             }).collect();
             let contrast_exponent_menu = Menu::new(rect, ViewId::ContrastExponentMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*contrast_exponent_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(contrast_exponent_menu.id(), *contrast_exponent_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(contrast_exponent_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_contrast_gray_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_contrast_gray_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::ContrastGrayMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1816,18 +1891,18 @@ impl Reader {
                                        (g - self.contrast.gray).abs() < f32::EPSILON)
             }).collect();
             let contrast_gray_menu = Menu::new(rect, ViewId::ContrastGrayMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*contrast_gray_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(contrast_gray_menu.id(), *contrast_gray_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(contrast_gray_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_margin_width_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_margin_width_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::MarginWidthMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1842,18 +1917,18 @@ impl Reader {
                                                                   EntryId::SetMarginWidth(mw),
                                                                   mw == margin_width)).collect();
             let margin_width_menu = Menu::new(rect, ViewId::MarginWidthMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*margin_width_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(margin_width_menu.id(), *margin_width_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(margin_width_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_page_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_page_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::PageMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1878,18 +1953,18 @@ impl Reader {
             }
 
             let page_menu = Menu::new(rect, ViewId::PageMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*page_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(page_menu.id(), *page_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(page_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_margin_cropper_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_margin_cropper_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::MarginCropperMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1917,18 +1992,18 @@ impl Reader {
             }
 
             let margin_cropper_menu = Menu::new(rect, ViewId::MarginCropperMenu, MenuKind::DropDown, entries, context);
-            hub.send(Event::Render(*margin_cropper_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(margin_cropper_menu.id(), *margin_cropper_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(margin_cropper_menu) as Box<dyn View>);
         }
     }
 
-    fn toggle_search_menu(&mut self, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+    fn toggle_search_menu(&mut self, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::SearchMenu) {
             if let Some(true) = enable {
                 return;
             }
 
-            hub.send(Event::Expose(*self.child(index).rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
             self.children.remove(index);
         } else {
             if let Some(false) = enable {
@@ -1943,12 +2018,12 @@ impl Reader {
                                                       self.search_direction == LinearDir::Backward)];
 
             let search_menu = Menu::new(rect, ViewId::SearchMenu, MenuKind::Contextual, entries, context);
-            hub.send(Event::Render(*search_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(search_menu.id(), *search_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(search_menu) as Box<dyn View>);
         }
     }
 
-    fn set_font_size(&mut self, font_size: f32, hub: &Hub, context: &mut Context) {
+    fn set_font_size(&mut self, font_size: f32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if Arc::strong_count(&self.doc) > 1 {
             return;
         }
@@ -1977,12 +2052,12 @@ impl Reader {
 
         self.cache.clear();
         self.text.clear();
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
-        self.update_bottom_bar(hub);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
+        self.update_bottom_bar(rq);
     }
 
-    fn set_text_align(&mut self, text_align: TextAlign, hub: &Hub, context: &mut Context) {
+    fn set_text_align(&mut self, text_align: TextAlign, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if Arc::strong_count(&self.doc) > 1 {
             return;
         }
@@ -2008,12 +2083,12 @@ impl Reader {
 
         self.cache.clear();
         self.text.clear();
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
-        self.update_bottom_bar(hub);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
+        self.update_bottom_bar(rq);
     }
 
-    fn set_font_family(&mut self, font_family: &str, hub: &Hub, context: &mut Context) {
+    fn set_font_family(&mut self, font_family: &str, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if Arc::strong_count(&self.doc) > 1 {
             return;
         }
@@ -2045,12 +2120,12 @@ impl Reader {
 
         self.cache.clear();
         self.text.clear();
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
-        self.update_bottom_bar(hub);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
+        self.update_bottom_bar(rq);
     }
 
-    fn set_line_height(&mut self, line_height: f32, hub: &Hub, context: &mut Context) {
+    fn set_line_height(&mut self, line_height: f32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if Arc::strong_count(&self.doc) > 1 {
             return;
         }
@@ -2076,12 +2151,12 @@ impl Reader {
 
         self.cache.clear();
         self.text.clear();
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
-        self.update_bottom_bar(hub);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
+        self.update_bottom_bar(rq);
     }
 
-    fn set_margin_width(&mut self, width: i32, hub: &Hub, context: &mut Context) {
+    fn set_margin_width(&mut self, width: i32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if Arc::strong_count(&self.doc) > 1 {
             return;
         }
@@ -2113,20 +2188,26 @@ impl Reader {
             }
         } else {
             let next_margin_width = mm_to_px(width as f32, CURRENT_DEVICE.dpi) as i32;
-            let ratio = (self.rect.width() as i32 - 2 * next_margin_width) as f32 /
-                        (self.rect.width() as i32 - 2 * self.view_port.margin_width) as f32;
-            self.view_port.top_offset = (self.view_port.top_offset as f32 * ratio) as i32;
+            if self.view_port.zoom_mode == ZoomMode::FitToWidth {
+                // Apply the scale change.
+                let ratio = (self.rect.width() as i32 - 2 * next_margin_width) as f32 /
+                            (self.rect.width() as i32 - 2 * self.view_port.margin_width) as f32;
+                self.view_port.page_offset.y = (self.view_port.page_offset.y as f32 * ratio) as i32;
+            } else {
+                // Keep the center still.
+                self.view_port.page_offset += pt!(next_margin_width - self.view_port.margin_width);
+            }
             self.view_port.margin_width = next_margin_width;
         }
 
         self.text.clear();
         self.cache.clear();
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
-        self.update_bottom_bar(hub);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
+        self.update_bottom_bar(rq);
     }
 
-    fn toggle_bookmark(&mut self, hub: &Hub) {
+    fn toggle_bookmark(&mut self, rq: &mut RenderQueue) {
         if let Some(ref mut r) = self.info.reader {
             if !r.bookmarks.insert(self.current_page) {
                 r.bookmarks.remove(&self.current_page);
@@ -2138,50 +2219,59 @@ impl Reader {
         let center = pt!(self.rect.max.x - 5 * radius,
                          self.rect.min.y + 5 * radius);
         let rect = Rectangle::from_disk(center, radius);
-        hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+        rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
     }
 
-    fn set_contrast_exponent(&mut self, exponent: f32, hub: &Hub, context: &mut Context) {
+    fn set_contrast_exponent(&mut self, exponent: f32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(ref mut r) = self.info.reader {
             r.contrast_exponent = Some(exponent);
         }
         self.contrast.exponent = exponent;
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
     }
 
-    fn set_contrast_gray(&mut self, gray: f32, hub: &Hub, context: &mut Context) {
+    fn set_contrast_gray(&mut self, gray: f32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(ref mut r) = self.info.reader {
             r.contrast_gray = Some(gray);
         }
         self.contrast.gray = gray;
-        self.update(None, hub, context);
-        self.update_tool_bar(hub, context);
+        self.update(None, hub, rq, context);
+        self.update_tool_bar(rq, context);
     }
 
-    fn set_zoom_mode(&mut self, zoom_mode: ZoomMode, hub: &Hub, context: &Context) {
+    fn set_zoom_mode(&mut self, zoom_mode: ZoomMode, reset_page_offset: bool, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         if self.view_port.zoom_mode == zoom_mode {
             return;
         }
         self.view_port.zoom_mode = zoom_mode;
-        self.view_port.top_offset = 0;
+        if reset_page_offset {
+            self.view_port.page_offset = pt!(0, 0);
+        }
         self.cache.clear();
-        self.update(None, hub, context);
+        self.update(None, hub, rq, context);
     }
 
-    fn crop_margins(&mut self, index: usize, margin: &Margin, hub: &Hub, context: &Context) {
-        if self.view_port.zoom_mode == ZoomMode::FitToWidth {
+    fn crop_margins(&mut self, index: usize, margin: &Margin, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
+        if self.view_port.zoom_mode != ZoomMode::FitToPage {
             let Resource { pixmap, frame, .. } = self.cache.get(&index).unwrap();
-            let ratio = (frame.min.y + self.view_port.top_offset) as f32 / pixmap.height as f32;
-            if ratio >= margin.top && ratio <= (1.0 - margin.bottom) {
-                let dims = {
-                    let doc = self.doc.lock().unwrap();
-                    doc.dims(index).unwrap()
-                };
-                let scale = scaling_factor(&self.rect, margin, self.view_port.margin_width, dims, ZoomMode::FitToWidth);
-                self.view_port.top_offset = (scale * (ratio - margin.top) * dims.1) as i32;
+            let offset = frame.min + self.view_port.page_offset;
+            let x_ratio = offset.x as f32 / pixmap.width as f32;
+            let y_ratio = offset.y as f32 / pixmap.height as f32;
+            let dims = {
+                let doc = self.doc.lock().unwrap();
+                doc.dims(index).unwrap()
+            };
+            let scale = scaling_factor(&self.rect, margin, self.view_port.margin_width, dims, self.view_port.zoom_mode);
+            if x_ratio >= margin.left && x_ratio <= (1.0 - margin.right) {
+                self.view_port.page_offset.x = (scale * (x_ratio - margin.left) * dims.0) as i32;
             } else {
-                self.view_port.top_offset = 0;
+                self.view_port.page_offset.x = 0;
+            }
+            if y_ratio >= margin.top && y_ratio <= (1.0 - margin.bottom) {
+                self.view_port.page_offset.y = (scale * (y_ratio - margin.top) * dims.1) as i32;
+            } else {
+                self.view_port.page_offset.y = 0;
             }
         }
         if let Some(r) = self.info.reader.as_mut() {
@@ -2193,7 +2283,7 @@ impl Reader {
             }
         }
         self.cache.clear();
-        self.update(None, hub, context);
+        self.update(None, hub, rq, context);
     }
 
     fn toc(&self) -> Option<Vec<TocEntry>> {
@@ -2313,7 +2403,7 @@ impl Reader {
         result
     }
 
-    fn render_results(&self, hub: &Hub) {
+    fn render_results(&self, rq: &mut RenderQueue) {
         for chunk in &self.chunks {
             if let Some(groups) = self.search.as_ref().and_then(|s| s.highlights.get(&chunk.location)) {
                 for rects in groups {
@@ -2327,7 +2417,7 @@ impl Reader {
                         }
                     }
                     if let Some(rect) = rect_opt {
-                        hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
                 }
             }
@@ -2350,15 +2440,15 @@ impl Reader {
                            .find(|a| a.selection[0] == sel[0] && a.selection[1] == sel[1]))
     }
 
-    fn reseed(&mut self, hub: &Hub, context: &mut Context) {
-        let (tx, _rx) = mpsc::channel();
+    fn reseed(&mut self, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<TopBar>(self) {
             self.child_mut(index).downcast_mut::<TopBar>().unwrap()
-                .update_frontlight_icon(&tx, context);
+                .update_frontlight_icon(&mut RenderQueue::new(), context);
             hub.send(Event::ClockTick).ok();
             hub.send(Event::BatteryTick).ok();
         }
-        hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+
+        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
     }
 
     fn quit(&mut self, context: &mut Context) {
@@ -2377,10 +2467,10 @@ impl Reader {
 
             if self.view_port.zoom_mode == ZoomMode::FitToPage {
                 r.zoom_mode = None;
-                r.top_offset = None;
+                r.page_offset = None;
             } else {
                 r.zoom_mode = Some(self.view_port.zoom_mode);
-                r.top_offset = Some(self.view_port.top_offset);
+                r.page_offset = Some(self.view_port.page_offset);
             }
 
             r.rotation = Some(CURRENT_DEVICE.to_canonical(context.display.rotation));
@@ -2400,10 +2490,36 @@ impl Reader {
             context.library.sync_reader_info(&self.info.file.path, r);
         }
     }
+
+    fn scale_page(&mut self, center: Point, factor: f32, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+        if self.cache.is_empty() {
+            return;
+        }
+
+        let current_factor = if let ZoomMode::Custom(sf) = self.view_port.zoom_mode {
+            sf
+        } else {
+            self.cache[&self.current_page].scale
+        };
+
+        if let Some(chunk) = self.chunks.iter().find(|chunk| {
+            let chunk_rect = chunk.frame - chunk.frame.min + chunk.position;
+            chunk_rect.includes(center)
+        }) {
+            let smw = self.view_port.margin_width;
+            let frame = self.cache[&chunk.location].frame;
+            self.current_page = chunk.location;
+            self.view_port.page_offset = Point::from(factor * Vec2::from(center - chunk.position + chunk.frame.min - frame.min)) -
+                                         pt!(self.rect.width() as i32 / 2 - smw,
+                                             self.rect.height() as i32 / 2 - smw);
+
+            self.set_zoom_mode(ZoomMode::Custom(current_factor * factor), false, hub, rq, context);
+        }
+    }
 }
 
 impl View for Reader {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, rq: &mut RenderQueue, context: &mut Context) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Rotate { quarter_turns, .. }) if quarter_turns != 0 => {
                 let (_, dir) = CURRENT_DEVICE.mirroring_scheme();
@@ -2411,24 +2527,48 @@ impl View for Reader {
                 hub.send(Event::Select(EntryId::Rotate(n))).ok();
                 true
             },
-            Event::Gesture(GestureEvent::Swipe { dir, start, end, .. }) if self.rect.includes(start) => {
-                match dir {
-                    Dir::West => self.go_to_neighbor(CycleDir::Next, hub, context),
-                    Dir::East => self.go_to_neighbor(CycleDir::Previous, hub, context),
-                    Dir::South | Dir::North => self.page_scroll(end.y - start.y, hub, context),
-                };
+            Event::Gesture(GestureEvent::Swipe { dir, start, end }) if self.rect.includes(start) => {
+                match self.view_port.zoom_mode {
+                    ZoomMode::FitToPage | ZoomMode::FitToWidth => {
+                        match dir {
+                            Dir::West => self.go_to_neighbor(CycleDir::Next, hub, rq, context),
+                            Dir::East => self.go_to_neighbor(CycleDir::Previous, hub, rq, context),
+                            Dir::South | Dir::North => self.page_scroll(start.y - end.y, hub, rq, context),
+                        };
+                    },
+                    ZoomMode::Custom(_) => {
+                        match dir {
+                            Dir::West | Dir::East => self.screen_scroll(pt!(start.x - end.x, 0), hub, rq, context),
+                            Dir::South | Dir::North => self.screen_scroll(pt!(0,start.y - end.y), hub, rq, context),
+                        };
+                    },
+                }
                 true
             },
-            Event::Gesture(GestureEvent::Spread { axis: Axis::Horizontal, starts, .. }) if self.rect.includes(starts[0]) => {
+            Event::Gesture(GestureEvent::SlantedSwipe { start, end, .. }) if self.rect.includes(start) => {
+                if let ZoomMode::Custom(_) = self.view_port.zoom_mode {
+                    self.screen_scroll(start - end, hub, rq, context);
+                }
+                true
+            },
+            Event::Gesture(GestureEvent::Spread { axis: Axis::Horizontal, center, .. }) if self.rect.includes(center) => {
                 if !self.reflowable {
-                    self.set_zoom_mode(ZoomMode::FitToWidth, hub, context);
+                    self.set_zoom_mode(ZoomMode::FitToWidth, true, hub, rq, context);
                 }
                 true
 
             },
-            Event::Gesture(GestureEvent::Pinch { axis: Axis::Horizontal, starts, .. }) if self.rect.includes(starts[0]) => {
+            Event::Gesture(GestureEvent::Pinch { axis: Axis::Horizontal, center, .. }) if self.rect.includes(center) => {
                 if !self.reflowable {
-                    self.set_zoom_mode(ZoomMode::FitToPage, hub, context);
+                    self.set_zoom_mode(ZoomMode::FitToPage, true, hub, rq, context);
+                }
+                true
+            },
+            Event::Gesture(GestureEvent::Spread { axis: Axis::Diagonal, center, factor }) |
+            Event::Gesture(GestureEvent::Pinch { axis: Axis::Diagonal, center, factor }) if factor.is_finite() &&
+                                                                                            self.rect.includes(center) => {
+                if !self.reflowable {
+                    self.scale_page(center, factor, hub, rq, context);
                 }
                 true
             },
@@ -2436,34 +2576,34 @@ impl View for Reader {
                 match dir {
                     Dir::West => {
                         if self.search.is_none() {
-                            self.go_to_chapter(CycleDir::Previous, hub, context);
+                            self.go_to_chapter(CycleDir::Previous, hub, rq, context);
                         } else {
-                            self.go_to_results_page(0, hub, context);
+                            self.go_to_results_page(0, hub, rq, context);
                         }
                     },
                     Dir::East => {
                         if self.search.is_none() {
-                            self.go_to_chapter(CycleDir::Next, hub, context);
+                            self.go_to_chapter(CycleDir::Next, hub, rq, context);
                         } else {
                             let last_page = self.search.as_ref().unwrap().highlights.len() - 1;
-                            self.go_to_results_page(last_page, hub, context);
+                            self.go_to_results_page(last_page, hub, rq, context);
                         }
                     },
                     Dir::North => {
                         self.search_direction = LinearDir::Backward;
-                        self.toggle_search_bar(true, hub, context);
+                        self.toggle_search_bar(true, hub, rq, context);
                     },
                     Dir::South => {
                         self.search_direction = LinearDir::Forward;
-                        self.toggle_search_bar(true, hub, context);
+                        self.toggle_search_bar(true, hub, rq, context);
                     },
-                };
+                }
                 true
             },
             Event::Gesture(GestureEvent::Corner { dir, .. }) => {
                 match dir {
-                    DiagDir::NorthWest => self.go_to_artefact(CycleDir::Previous, hub, context),
-                    DiagDir::NorthEast => self.go_to_artefact(CycleDir::Next, hub, context),
+                    DiagDir::NorthWest => self.go_to_bookmark(CycleDir::Previous, hub, rq, context),
+                    DiagDir::NorthEast => self.go_to_bookmark(CycleDir::Next, hub, rq, context),
                     DiagDir::SouthEast => {
                         hub.send(Event::Select(EntryId::ToggleMonochrome)).ok();
                     },
@@ -2488,15 +2628,27 @@ impl View for Reader {
                 };
                 true
             },
+            Event::Gesture(GestureEvent::MultiCorner { dir, .. }) => {
+                match dir {
+                    DiagDir::NorthWest => self.go_to_annotation(CycleDir::Previous, hub, rq, context),
+                    DiagDir::NorthEast => self.go_to_annotation(CycleDir::Next, hub, rq, context),
+                    _ => (),
+                }
+                true
+            },
             Event::Gesture(GestureEvent::Cross(_)) => {
                 self.quit(context);
                 hub.send(Event::Back).ok();
                 true
             },
+            Event::Gesture(GestureEvent::Diamond(_)) => {
+                self.toggle_bars(None, hub, rq, context);
+                true
+            },
             Event::Gesture(GestureEvent::HoldButtonShort(code, ..)) => {
                 match code {
-                    ButtonCode::Backward => self.go_to_chapter(CycleDir::Previous, hub, context),
-                    ButtonCode::Forward => self.go_to_chapter(CycleDir::Next, hub, context),
+                    ButtonCode::Backward => self.go_to_chapter(CycleDir::Previous, hub, rq, context),
+                    ButtonCode::Forward => self.go_to_chapter(CycleDir::Next, hub, rq, context),
                     _ => (),
                 }
                 self.held_buttons.insert(code);
@@ -2507,16 +2659,16 @@ impl View for Reader {
                     match code {
                         ButtonCode::Backward => {
                             if self.search.is_none() {
-                                self.go_to_neighbor(CycleDir::Previous, hub, context);
+                                self.go_to_neighbor(CycleDir::Previous, hub, rq, context);
                             } else {
-                                self.go_to_results_neighbor(CycleDir::Previous, hub, context);
+                                self.go_to_results_neighbor(CycleDir::Previous, hub, rq, context);
                             }
                         },
                         ButtonCode::Forward => {
                             if self.search.is_none() {
-                                self.go_to_neighbor(CycleDir::Next, hub, context);
+                                self.go_to_neighbor(CycleDir::Next, hub, rq, context);
                             } else {
-                                self.go_to_results_neighbor(CycleDir::Next, hub, context);
+                                self.go_to_results_neighbor(CycleDir::Next, hub, rq, context);
                             }
                         },
                         _ => (),
@@ -2574,12 +2726,12 @@ impl View for Reader {
                                         rect.absorb(&next_rect);
                                     }
                                 } else {
-                                    hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                                    rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                                     rect = next_rect;
                                 }
                                 i += 1;
                             }
-                            hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                            rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                         }
                     }
 
@@ -2601,12 +2753,12 @@ impl View for Reader {
                                         rect.absorb(&prev_rect);
                                     }
                                 } else {
-                                    hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                                    rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                                     rect = prev_rect;
                                 }
                                 i -= 1;
                             }
-                            hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                            rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                         }
                     }
 
@@ -2618,7 +2770,7 @@ impl View for Reader {
             Event::Device(DeviceEvent::Finger { status: FingerStatus::Up, position, id, .. }) if self.state == State::Selection(id) => {
                 self.state = State::Idle;
                 let radius = scale_by_dpi(24.0, CURRENT_DEVICE.dpi) as i32;
-                self.toggle_selection_menu(Rectangle::from_disk(position, radius), Some(true), hub, context);
+                self.toggle_selection_menu(Rectangle::from_disk(position, radius), Some(true), rq, context);
                 true
             },
             Event::Gesture(GestureEvent::Tap(center)) if self.state == State::AdjustSelection && self.rect.includes(center) => {
@@ -2691,12 +2843,12 @@ impl View for Reader {
                                         rect.absorb(&next_rect);
                                     }
                                 } else {
-                                    hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                                    rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                                     rect = next_rect;
                                 }
                                 i += 1;
                             }
-                            hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                            rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                         }
                     }
 
@@ -2718,12 +2870,12 @@ impl View for Reader {
                                         rect.absorb(&prev_rect);
                                     }
                                 } else {
-                                    hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                                    rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                                     rect = prev_rect;
                                 }
                                 i -= 1;
                             }
-                            hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                            rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                         }
                     }
 
@@ -2773,7 +2925,7 @@ impl View for Reader {
                         }
                     } else if let Some(caps) = pdf_page.captures(&link.text) {
                         if let Ok(index) = caps[1].parse::<usize>() {
-                            self.go_to_page(index.saturating_sub(1), true, hub, context);
+                            self.go_to_page(index.saturating_sub(1), true, hub, rq, context);
                         }
                     } else {
                         let mut doc = self.doc.lock().unwrap();
@@ -2787,64 +2939,89 @@ impl View for Reader {
                     return true;
                 }
 
-                let w = self.rect.width() as i32;
-                let h = self.rect.height() as i32;
-                let m = w.min(h);
-                let db = m / 3;
-                let ds = db / 2;
-                let x1 = self.rect.min.x + db;
-                let x2 = self.rect.max.x - db;
-                let sx1 = self.rect.min.x + ds;
-                let sx2 = self.rect.max.x - ds;
-
-                if center.x < x1 {
-                    let dc = sx1 - center.x;
-                    // Top left corner.
-                    if dc > 0 && center.y < self.rect.min.y + dc {
-                        self.go_to_last_page(hub, context);
-                    // Bottom left corner.
-                    } else if dc > 0 && center.y > self.rect.max.y - dc {
-                        if self.search.is_none() {
-                            if self.ephemeral {
-                                self.quit(context);
-                                hub.send(Event::Back).ok();
-                            } else {
-                                hub.send(Event::Show(ViewId::TableOfContents)).ok();
+                if let ZoomMode::Custom(_) = self.view_port.zoom_mode {
+                    let dx = self.rect.width() as i32 - 2 * self.view_port.margin_width;
+                    let dy = self.rect.height() as i32 - 2 * self.view_port.margin_width;
+                    match Region::from_point(center, self.rect,
+                                             context.settings.reader.strip_width,
+                                             context.settings.reader.corner_width) {
+                        Region::Corner(diag_dir) => {
+                            match diag_dir {
+                                DiagDir::NorthEast => self.screen_scroll(pt!(dx, -dy), hub, rq, context),
+                                DiagDir::SouthEast => self.screen_scroll(pt!(dx, dy), hub, rq, context),
+                                DiagDir::SouthWest => self.screen_scroll(pt!(-dx, dy), hub, rq, context),
+                                DiagDir::NorthWest => self.screen_scroll(pt!(-dx, -dy), hub, rq, context),
                             }
-                        } else {
-                            self.go_to_neighbor(CycleDir::Previous, hub, context);
-                        }
-                    // Left ear.
-                    } else {
-                        if self.search.is_none() {
-                            self.go_to_neighbor(CycleDir::Previous, hub, context);
-                        } else {
-                            self.go_to_results_neighbor(CycleDir::Previous, hub, context);
-                        }
+                        },
+                        Region::Strip(dir) => {
+                            match dir {
+                                Dir::North => self.screen_scroll(pt!(0, -dy), hub, rq, context),
+                                Dir::East => self.screen_scroll(pt!(dx, 0), hub, rq, context),
+                                Dir::South => self.screen_scroll(pt!(0, dy), hub, rq, context),
+                                Dir::West => self.screen_scroll(pt!(-dx, 0), hub, rq, context),
+                            }
+                        },
+                        Region::Center => self.toggle_bars(None, hub, rq, context),
                     }
-                } else if center.x > x2 {
-                    let dc = center.x - sx2;
-                    // Top right corner.
-                    if dc > 0 && center.y < self.rect.min.y + dc {
-                        self.toggle_bookmark(hub);
-                    // Bottom right corner.
-                    } else if dc > 0 && center.y > self.rect.max.y - dc {
-                        if self.search.is_none() {
-                            hub.send(Event::Toggle(ViewId::GoToPage)).ok();
-                        } else {
-                            self.go_to_neighbor(CycleDir::Next, hub, context);
+
+                    return true;
+                }
+
+                match Region::from_point(center, self.rect,
+                                         context.settings.reader.strip_width,
+                                         context.settings.reader.corner_width) {
+                    Region::Corner(diag_dir) => {
+                        match diag_dir {
+                            DiagDir::NorthWest => self.go_to_last_page(hub, rq, context),
+                            DiagDir::NorthEast => self.toggle_bookmark(rq),
+                            DiagDir::SouthEast => {
+                                if self.search.is_none() {
+                                    match context.settings.reader.south_east_corner {
+                                        SouthEastCornerAction::GoToPage => {
+                                            hub.send(Event::Toggle(ViewId::GoToPage)).ok();
+                                        },
+                                        SouthEastCornerAction::NextPage => {
+                                            self.go_to_neighbor(CycleDir::Next, hub, rq, context);
+                                        },
+                                    }
+                                } else {
+                                    self.go_to_neighbor(CycleDir::Next, hub, rq, context);
+                                }
+                            },
+                            DiagDir::SouthWest => {
+                                if self.search.is_none() {
+                                    if self.ephemeral && self.info.file.path == PathBuf::from(MEM_SCHEME) {
+                                        self.quit(context);
+                                        hub.send(Event::Back).ok();
+                                    } else {
+                                        hub.send(Event::Show(ViewId::TableOfContents)).ok();
+                                    }
+                                } else {
+                                    self.go_to_neighbor(CycleDir::Previous, hub, rq, context);
+                                }
+                            },
                         }
-                    // Right ear.
-                    } else {
-                        if self.search.is_none() {
-                            self.go_to_neighbor(CycleDir::Next, hub, context);
-                        } else {
-                            self.go_to_results_neighbor(CycleDir::Next, hub, context);
+                    },
+                    Region::Strip(dir) => {
+                        match dir {
+                            Dir::West => {
+                                if self.search.is_none() {
+                                    self.go_to_neighbor(CycleDir::Previous, hub, rq, context);
+                                } else {
+                                    self.go_to_results_neighbor(CycleDir::Previous, hub, rq, context);
+                                }
+                            },
+                            Dir::East => {
+                                if self.search.is_none() {
+                                    self.go_to_neighbor(CycleDir::Next, hub, rq, context);
+                                } else {
+                                    self.go_to_results_neighbor(CycleDir::Next, hub, rq, context);
+                                }
+                            },
+                            Dir::South | Dir::North => self.toggle_bars(None, hub, rq, context),
                         }
-                    }
-                // Middle band.
-                } else {
-                    self.toggle_bars(None, hub, context);
+                    },
+                    Region::Center => self.toggle_bars(None, hub, rq, context),
                 }
 
                 true
@@ -2863,7 +3040,7 @@ impl View for Reader {
                     if d < dmax {
                         self.state = State::Idle;
                         let radius = scale_by_dpi(24.0, CURRENT_DEVICE.dpi) as i32;
-                        self.toggle_selection_menu(Rectangle::from_disk(center, radius), Some(true), hub, context);
+                        self.toggle_selection_menu(Rectangle::from_disk(center, radius), Some(true), rq, context);
                     }
                     return true;
                 }
@@ -2884,7 +3061,7 @@ impl View for Reader {
                     if let Some(annot) = self.annotations.values().flatten()
                                              .find(|annot| anchor >= annot.selection[0] && anchor <= annot.selection[1]).cloned() {
                         let radius = scale_by_dpi(24.0, CURRENT_DEVICE.dpi) as i32;
-                        self.toggle_annotation_menu(&annot, Rectangle::from_disk(center, radius), Some(true), hub, context);
+                        self.toggle_annotation_menu(&annot, Rectangle::from_disk(center, radius), Some(true), rq, context);
                     } else {
                         self.selection = Some(Selection {
                             start: anchor,
@@ -2892,7 +3069,7 @@ impl View for Reader {
                             anchor,
                         });
                         self.state = State::Selection(id);
-                        hub.send(Event::RenderRegion(rect, UpdateMode::Fast)).ok();
+                        rq.add(RenderData::new(self.id, rect, UpdateMode::Fast));
                     }
                 }
 
@@ -2909,7 +3086,7 @@ impl View for Reader {
                 true
             },
             Event::Update(mode) => {
-                self.update(Some(mode), hub, context);
+                self.update(Some(mode), hub, rq, context);
                 true
             },
             Event::LoadPixmap(location) => {
@@ -2917,21 +3094,21 @@ impl View for Reader {
                 true
             },
             Event::Submit(ViewId::GoToPageInput, ref text) => {
-                let re = Regex::new(r#"^([-+"'])?(.+)$"#).unwrap();
+                let re = Regex::new(r#"^([-+'])?(.+)$"#).unwrap();
                 if let Some(caps) = re.captures(text) {
                     let prefix = caps.get(1).map(|m| m.as_str());
-                    if prefix == Some("\"") || prefix == Some("'") {
+                    if prefix == Some("'") {
                         if let Some(location) = self.find_page_by_name(&caps[2]) {
-                            self.go_to_page(location, true, hub, context);
+                            self.go_to_page(location, true, hub, rq, context);
                         }
                     } else {
                         if text == "_" {
                             let location = (context.rng.next_u64() % self.pages_count as u64) as usize;
-                            self.go_to_page(location, true, hub, context);
+                            self.go_to_page(location, true, hub, rq, context);
                         } else if text == "(" {
-                            self.go_to_page(0, true, hub, context);
+                            self.go_to_page(0, true, hub, rq, context);
                         } else if text == ")" {
-                            self.go_to_page(self.pages_count.saturating_sub(1), true, hub, context);
+                            self.go_to_page(self.pages_count.saturating_sub(1), true, hub, rq, context);
                         } else if let Ok(number) = caps[2].parse::<f64>() {
                             let location = if !self.synthetic {
                                 let mut index = number.max(0.0) as usize;
@@ -2944,7 +3121,7 @@ impl View for Reader {
                             } else {
                                 (number * BYTES_PER_PAGE).max(0.0).round() as usize
                             };
-                            self.go_to_page(location, true, hub, context);
+                            self.go_to_page(location, true, hub, rq, context);
                         }
                     }
                 }
@@ -2952,7 +3129,7 @@ impl View for Reader {
             },
             Event::Submit(ViewId::GoToResultsPageInput, ref text) => {
                 if let Ok(index) = text.parse::<usize>() {
-                    self.go_to_results_page(index.saturating_sub(1), hub, context);
+                    self.go_to_results_page(index.saturating_sub(1), hub, rq, context);
                 }
                 true
             },
@@ -2962,7 +3139,7 @@ impl View for Reader {
                         r.page_names.insert(self.current_page, text.to_string());
                     }
                 }
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
                 true
             },
             Event::Submit(ViewId::EditNoteInput, ref note) => {
@@ -2979,7 +3156,7 @@ impl View for Reader {
                         });
                     });
                     if let Some(rect) = self.text_rect(sel) {
-                        hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
                 } else {
                     if let Some(sel) = self.target_annotation.take() {
@@ -2988,38 +3165,37 @@ impl View for Reader {
                             annot.modified = Local::now();
                         }
                         if let Some(rect) = self.text_rect(sel) {
-                            hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                            rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                         }
                     }
                 }
 
                 self.update_annotations();
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
                 true
             },
             Event::Submit(ViewId::ReaderSearchInput, ref text) => {
                 match make_query(text) {
                     Some(query) => {
-                        self.search(text, query, hub);
-                        self.toggle_keyboard(false, None, hub, context);
-                        self.toggle_results_bar(true, hub, context);
+                        self.search(text, query, hub, rq);
+                        self.toggle_keyboard(false, None, hub, rq, context);
+                        self.toggle_results_bar(true, rq, context);
                     },
                     None => {
                         let notif = Notification::new(ViewId::InvalidSearchQueryNotif,
                                                       "Invalid search query.".to_string(),
-                                                      hub,
-                                                      context);
+                                                      hub, rq, context);
                         self.children.push(Box::new(notif) as Box<dyn View>);
                     },
                 }
                 true
             },
             Event::Page(dir) => {
-                self.go_to_neighbor(dir, hub, context);
+                self.go_to_neighbor(dir, hub, rq, context);
                 true
             },
             Event::GoTo(location) | Event::Select(EntryId::GoTo(location)) => {
-                self.go_to_page(location, true, hub, context);
+                self.go_to_page(location, true, hub, rq, context);
                 true
             },
             Event::GoToLocation(ref location) => {
@@ -3028,172 +3204,206 @@ impl View for Reader {
                     doc.resolve_location(location.clone())
                 };
                 if let Some(offset) = offset_opt {
-                    self.go_to_page(offset, true, hub, context);
+                    self.go_to_page(offset, true, hub, rq, context);
                 }
                 true
             },
             Event::Chapter(dir) => {
-                self.go_to_chapter(dir, hub, context);
+                self.go_to_chapter(dir, hub, rq, context);
                 true
             },
             Event::ResultsPage(dir) => {
-                self.go_to_results_neighbor(dir, hub, context);
+                self.go_to_results_neighbor(dir, hub, rq, context);
                 true
             },
             Event::CropMargins(ref margin) => {
                 let current_page = self.current_page;
-                self.crop_margins(current_page, margin.as_ref(), hub, context);
+                self.crop_margins(current_page, margin.as_ref(), hub, rq, context);
                 true
             },
             Event::Toggle(ViewId::TopBottomBars) => {
-                self.toggle_bars(None, hub, context);
+                self.toggle_bars(None, hub, rq, context);
                 true
             },
             Event::Toggle(ViewId::GoToPage) => {
-                self.toggle_go_to_page(None, ViewId::GoToPage, hub, context);
+                self.toggle_go_to_page(None, ViewId::GoToPage, hub, rq, context);
                 true
             },
             Event::Toggle(ViewId::GoToResultsPage) => {
-                self.toggle_go_to_page(None, ViewId::GoToResultsPage, hub, context);
+                self.toggle_go_to_page(None, ViewId::GoToResultsPage, hub, rq, context);
                 true
             },
             Event::Slider(SliderId::FontSize, font_size, FingerStatus::Up) => {
-                self.set_font_size(font_size, hub, context);
+                self.set_font_size(font_size, hub, rq, context);
                 true
             },
             Event::Slider(SliderId::ContrastExponent, exponent, FingerStatus::Up) => {
-                self.set_contrast_exponent(exponent, hub, context);
+                self.set_contrast_exponent(exponent, hub, rq, context);
                 true
             },
             Event::Slider(SliderId::ContrastGray, gray, FingerStatus::Up) => {
-                self.set_contrast_gray(gray, hub, context);
+                self.set_contrast_gray(gray, hub, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::TitleMenu, rect) => {
-                self.toggle_title_menu(rect, None, hub, context);
+                self.toggle_title_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::MainMenu, rect) => {
-                toggle_main_menu(self, rect, None, hub, context);
+                toggle_main_menu(self, rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::BatteryMenu, rect) => {
-                toggle_battery_menu(self, rect, None, hub, context);
+                toggle_battery_menu(self, rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::ClockMenu, rect) => {
-                toggle_clock_menu(self, rect, None, hub, context);
+                toggle_clock_menu(self, rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::MarginCropperMenu, rect) => {
-                self.toggle_margin_cropper_menu(rect, None, hub, context);
+                self.toggle_margin_cropper_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::SearchMenu, rect) => {
-                self.toggle_search_menu(rect, None, hub, context);
+                self.toggle_search_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::FontFamilyMenu, rect) => {
-                self.toggle_font_family_menu(rect, None, hub, context);
+                self.toggle_font_family_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::FontSizeMenu, rect) => {
-                self.toggle_font_size_menu(rect, None, hub, context);
+                self.toggle_font_size_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::TextAlignMenu, rect) => {
-                self.toggle_text_align_menu(rect, None, hub, context);
+                self.toggle_text_align_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::MarginWidthMenu, rect) => {
-                self.toggle_margin_width_menu(rect, None, hub, context);
+                self.toggle_margin_width_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::LineHeightMenu, rect) => {
-                self.toggle_line_height_menu(rect, None, hub, context);
+                self.toggle_line_height_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::ContrastExponentMenu, rect) => {
-                self.toggle_contrast_exponent_menu(rect, None, hub, context);
+                self.toggle_contrast_exponent_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::ContrastGrayMenu, rect) => {
-                self.toggle_contrast_gray_menu(rect, None, hub, context);
+                self.toggle_contrast_gray_menu(rect, None, rq, context);
                 true
             },
             Event::ToggleNear(ViewId::PageMenu, rect) => {
-                self.toggle_page_menu(rect, None, hub, context);
+                self.toggle_page_menu(rect, None, rq, context);
                 true
             },
             Event::Close(ViewId::MainMenu) => {
-                toggle_main_menu(self, Rectangle::default(), Some(false), hub, context);
+                toggle_main_menu(self, Rectangle::default(), Some(false), rq, context);
                 true
             },
             Event::Close(ViewId::SearchBar) => {
-                self.toggle_results_bar(false, hub, context);
-                self.toggle_search_bar(false, hub, context);
+                self.toggle_results_bar(false, rq, context);
+                self.toggle_search_bar(false, hub, rq, context);
                 if let Some(ref mut s) = self.search {
                     s.running.store(false, AtomicOrdering::Relaxed);
-                    self.render_results(hub);
+                    self.render_results(rq);
                     self.search = None;
                 }
                 true
             },
             Event::Close(ViewId::GoToPage) => {
-                self.toggle_go_to_page(Some(false), ViewId::GoToPage, hub, context);
+                self.toggle_go_to_page(Some(false), ViewId::GoToPage, hub, rq, context);
                 true
             },
             Event::Close(ViewId::GoToResultsPage) => {
-                self.toggle_go_to_page(Some(false), ViewId::GoToResultsPage, hub, context);
+                self.toggle_go_to_page(Some(false), ViewId::GoToResultsPage, hub, rq, context);
                 true
             },
             Event::Close(ViewId::SelectionMenu) => {
                 if self.state == State::Idle && self.target_annotation.is_none() {
                     if let Some(rect) = self.selection_rect() {
                         self.selection = None;
-                        hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
                 }
                 false
             },
             Event::Close(ViewId::EditNote) => {
-                self.toggle_edit_note(None, Some(false), hub, context);
+                self.toggle_edit_note(None, Some(false), hub, rq, context);
                 if let Some(rect) = self.selection_rect() {
                     self.selection = None;
-                    hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
                 self.target_annotation = None;
                 false
             },
             Event::Close(ViewId::NamePage) => {
-                self.toggle_keyboard(false, None, hub, context);
+                self.toggle_keyboard(false, None, hub, rq, context);
                 false
             },
             Event::Show(ViewId::TableOfContents) => {
                 {
-                    self.toggle_bars(Some(false), hub, context);
+                    self.toggle_bars(Some(false), hub, rq, context);
                 }
                 let mut doc = self.doc.lock().unwrap();
                 if let Some(toc) = self.toc()
                                        .or_else(|| doc.toc())
                                        .filter(|toc| !toc.is_empty()) {
-                    let chap_index = doc.chapter(self.current_page, &toc)
-                                        .map(|chap| chap.index)
-                                        .unwrap_or(usize::MAX);
-                    hub.send(Event::OpenToc(toc, chap_index)).ok();
+                    let chap = doc.chapter(self.current_page, &toc);
+                    let chap_index = chap.map_or(usize::MAX, |chap| chap.index);
+                    let html = toc_as_html(&toc, chap_index);
+                    let link_uri = chap.and_then(|chap| {
+                        match chap.location {
+                            Location::Uri(ref uri) => Some(format!("@{}", uri)),
+                            Location::Exact(offset) => Some(format!("@{}", offset)),
+                            _ => None,
+                        }
+                    });
+                    hub.send(Event::OpenHtml(html, link_uri)).ok();
+                }
+                true
+            },
+            Event::Select(EntryId::Annotations) => {
+                self.toggle_bars(Some(false), hub, rq, context);
+                let mut starts = self.annotations.values().flatten()
+                                     .map(|annot| annot.selection[0]).collect::<Vec<TextLocation>>();
+                starts.sort();
+                let active_range = starts.first().cloned().zip(starts.last().cloned());
+                if let Some(mut annotations) = self.info.reader.as_ref().map(|r| &r.annotations).cloned() {
+                    annotations.sort_by(|a, b| a.selection[0].cmp(&b.selection[0]));
+                    let html = annotations_as_html(&annotations, active_range);
+                    let link_uri = annotations.iter()
+                                              .filter(|annot| annot.selection[0].location() <= self.current_page)
+                                              .max_by_key(|annot| annot.selection[0])
+                                              .map(|annot| format!("@{}", annot.selection[0].location()));
+                    hub.send(Event::OpenHtml(html, link_uri)).ok();
+                }
+                true
+            },
+            Event::Select(EntryId::Bookmarks) => {
+                self.toggle_bars(Some(false), hub, rq, context);
+                if let Some(bookmarks) = self.info.reader.as_ref().map(|r| &r.bookmarks) {
+                    let html = bookmarks_as_html(&bookmarks, self.current_page, self.synthetic);
+                    let link_uri = bookmarks.range(..= self.current_page).next_back()
+                                            .map(|index| format!("@{}", index));
+                    hub.send(Event::OpenHtml(html, link_uri)).ok();
                 }
                 true
             },
             Event::Show(ViewId::SearchBar) => {
-                self.toggle_search_bar(true, hub, context);
+                self.toggle_search_bar(true, hub, rq, context);
                 true
             },
             Event::Show(ViewId::MarginCropper) => {
-                self.toggle_margin_cropper(true, hub, context);
+                self.toggle_margin_cropper(true, hub, rq, context);
                 true
             },
             Event::Close(ViewId::MarginCropper) => {
-                self.toggle_margin_cropper(false, hub, context);
+                self.toggle_margin_cropper(false, hub, rq, context);
                 true
             },
             Event::SearchResult(location, ref rects) => {
@@ -3213,14 +3423,14 @@ impl View for Reader {
                     }
                 }
 
-                self.update_results_bar(hub);
+                self.update_results_bar(rq);
 
                 if results_count == 1 {
-                    self.toggle_results_bar(false, hub, context);
-                    self.toggle_search_bar(false, hub, context);
-                    self.go_to_page(location, true, hub, context);
+                    self.toggle_results_bar(false, rq, context);
+                    self.toggle_search_bar(false, hub, rq, context);
+                    self.go_to_page(location, true, hub, rq, context);
                 } else if location == self.current_page {
-                    self.update(None, hub, context);
+                    self.update(None, hub, rq, context);
                 }
 
                 true
@@ -3232,15 +3442,16 @@ impl View for Reader {
                     let notif = Notification::new(ViewId::NoSearchResultsNotif,
                                                   "No search results.".to_string(),
                                                   hub,
+                                                  rq,
                                                   context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
-                    self.toggle_search_bar(true, hub, context);
+                    self.toggle_search_bar(true, hub, rq, context);
                     hub.send(Event::Focus(Some(ViewId::ReaderSearchInput))).ok();
                 }
                 true
             },
             Event::Select(EntryId::AnnotateSelection) => {
-                self.toggle_edit_note(None, Some(true), hub, context);
+                self.toggle_edit_note(None, Some(true), hub, rq, context);
                 true
             },
             Event::Select(EntryId::HighlightSelection) => {
@@ -3255,7 +3466,7 @@ impl View for Reader {
                         });
                     });
                     if let Some(rect) = self.text_rect([sel.start, sel.end]) {
-                        hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
                     self.update_annotations();
                 }
@@ -3276,19 +3487,20 @@ impl View for Reader {
                     let text = text.trim_matches(|c: char| !c.is_alphanumeric());
                     match make_query(text) {
                         Some(query) => {
-                            self.search(text, query, hub);
+                            self.search(text, query, hub, rq);
                         },
                         None => {
                             let notif = Notification::new(ViewId::InvalidSearchQueryNotif,
                                                           "Invalid search query.".to_string(),
                                                           hub,
+                                                          rq,
                                                           context);
                             self.children.push(Box::new(notif) as Box<dyn View>);
                         },
                     }
                 }
                 if let Some(rect) = self.selection_rect() {
-                    hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
                 self.selection = None;
                 true
@@ -3301,10 +3513,10 @@ impl View for Reader {
                                   .unwrap_or(text.len());
                     self.find_page_by_name(&text[..end])
                 }).map(|loc| {
-                    self.go_to_page(loc, true, hub, context);
+                    self.go_to_page(loc, true, hub, rq, context);
                 });
                 if let Some(rect) = self.selection_rect() {
-                    hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
                 self.selection = None;
                 true
@@ -3315,7 +3527,7 @@ impl View for Reader {
             },
             Event::Select(EntryId::EditAnnotationNote(sel)) => {
                 let text = self.find_annotation_ref(sel).map(|annot| annot.note.clone());
-                self.toggle_edit_note(text, Some(true), hub, context);
+                self.toggle_edit_note(text, Some(true), hub, rq, context);
                 self.target_annotation = Some(sel);
                 true
             },
@@ -3326,7 +3538,7 @@ impl View for Reader {
                     self.update_annotations();
                 }
                 if let Some(rect) = self.text_rect(sel) {
-                    hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
                 true
             },
@@ -3336,12 +3548,25 @@ impl View for Reader {
                     self.update_annotations();
                 }
                 if let Some(rect) = self.text_rect(sel) {
-                    hub.send(Event::RenderRegion(rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
                 true
             },
             Event::Select(EntryId::SetZoomMode(zoom_mode)) => {
-                self.set_zoom_mode(zoom_mode, hub, context);
+                self.set_zoom_mode(zoom_mode, true, hub, rq, context);
+                true
+            },
+            Event::Select(EntryId::Save) => {
+                let name = format!("{}-{}.{}", self.info.title.to_lowercase().replace(' ', "_"),
+                                   Local::now().format("%Y%m%d_%H%M%S"),
+                                   self.info.file.kind);
+                let doc = self.doc.lock().unwrap();
+                let msg = match doc.save(&name) {
+                    Err(e) => format!("{}", e),
+                    Ok(()) => format!("Saved {}.", name),
+                };
+                let notif = Notification::new(ViewId::SaveDocumentNotif, msg, hub, rq, context);
+                self.children.push(Box::new(notif) as Box<dyn View>);
                 true
             },
             Event::Select(EntryId::ApplyCroppings(index, scheme)) => {
@@ -3358,7 +3583,7 @@ impl View for Reader {
                     r.cropping_margins = None;
                 }
                 self.cache.clear();
-                self.update(None, hub, context);
+                self.update(None, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SearchDirection(dir)) => {
@@ -3366,11 +3591,11 @@ impl View for Reader {
                 true
             },
             Event::Select(EntryId::SetFontFamily(ref font_family)) => {
-                self.set_font_family(font_family, hub, context);
+                self.set_font_family(font_family, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetTextAlign(text_align)) => {
-                self.set_text_align(text_align, hub, context);
+                self.set_text_align(text_align, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetFontSize(v)) => {
@@ -3378,30 +3603,30 @@ impl View for Reader {
                                     .and_then(|r| r.font_size)
                                     .unwrap_or(context.settings.reader.font_size);
                 let font_size = font_size - 1.0 + v as f32 / 10.0;
-                self.set_font_size(font_size, hub, context);
+                self.set_font_size(font_size, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetMarginWidth(width)) => {
-                self.set_margin_width(width, hub, context);
+                self.set_margin_width(width, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetLineHeight(v)) => {
                 let line_height = 1.0 + v as f32 / 10.0;
-                self.set_line_height(line_height, hub, context);
+                self.set_line_height(line_height, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetContrastExponent(v)) => {
                 let exponent = 1.0 + v as f32 / 2.0;
-                self.set_contrast_exponent(exponent, hub, context);
+                self.set_contrast_exponent(exponent, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetContrastGray(v)) => {
                 let gray = ((1 << 8) - (1 << (8 - v))) as f32;
-                self.set_contrast_gray(gray, hub, context);
+                self.set_contrast_gray(gray, hub, rq, context);
                 true
             },
             Event::Select(EntryId::SetPageName) => {
-                self.toggle_name_page(None, hub, context);
+                self.toggle_name_page(None, hub, rq, context);
                 true
             },
             Event::Select(EntryId::RemovePageName) => {
@@ -3411,13 +3636,13 @@ impl View for Reader {
                 true
             },
             Event::Reseed => {
-                self.reseed(hub, context);
+                self.reseed(hub, rq, context);
                 true
             },
             Event::ToggleFrontlight => {
                 if let Some(index) = locate::<TopBar>(self) {
                     self.child_mut(index).downcast_mut::<TopBar>().unwrap()
-                        .update_frontlight_icon(hub, context);
+                        .update_frontlight_icon(rq, context);
                 }
                 true
             },
@@ -3434,17 +3659,19 @@ impl View for Reader {
                 false
             },
             Event::Focus(v) => {
-                if let Some(ViewId::ReaderSearchInput) = v {
-                    self.toggle_results_bar(false, hub, context);
-                    if let Some(ref mut s) = self.search {
-                        s.running.store(false, AtomicOrdering::Relaxed);
+                if self.focus != v {
+                    if let Some(ViewId::ReaderSearchInput) = v {
+                        self.toggle_results_bar(false, rq, context);
+                        if let Some(ref mut s) = self.search {
+                            s.running.store(false, AtomicOrdering::Relaxed);
+                        }
+                        self.render_results(rq);
+                        self.search = None;
                     }
-                    self.render_results(hub);
-                    self.search = None;
-                }
-                self.focus = v;
-                if v.is_some() {
-                    self.toggle_keyboard(true, v, hub, context);
+                    self.focus = v;
+                    if v.is_some() {
+                        self.toggle_keyboard(true, v, hub, rq, context);
+                    }
                 }
                 true
             },
@@ -3569,7 +3796,7 @@ impl View for Reader {
             .unwrap_or(self.rect)
     }
 
-    fn resize(&mut self, rect: Rectangle, hub: &Hub, context: &mut Context) {
+    fn resize(&mut self, rect: Rectangle, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if !self.children.is_empty() {
             let dpi = CURRENT_DEVICE.dpi;
             let thickness = scale_by_dpi(THICKNESS_MEDIUM, dpi) as i32;
@@ -3583,12 +3810,12 @@ impl View for Reader {
             if self.children[0].is::<TopBar>() {
                 let top_bar_rect = rect![rect.min.x, rect.min.y,
                                          rect.max.x, small_height - small_thickness];
-                self.children[0].resize(top_bar_rect, hub, context);
+                self.children[0].resize(top_bar_rect, hub, rq, context);
                 let separator_rect = rect![rect.min.x,
                                            small_height - small_thickness,
                                            rect.max.x,
                                            small_height + big_thickness];
-                self.children[1].resize(separator_rect, hub, context);
+                self.children[1].resize(separator_rect, hub, rq, context);
             } else if self.children[0].is::<Filler>() {
                 let mut index = 1;
                 if self.children[index].is::<SearchBar>() {
@@ -3596,10 +3823,10 @@ impl View for Reader {
                                         rect.max.y - (3 * big_height + 2 * small_height) as i32 + big_thickness,
                                         rect.max.x,
                                         rect.max.y - (3 * big_height + small_height) as i32 - small_thickness];
-                    self.children[index].resize(sb_rect, hub, context);
+                    self.children[index].resize(sb_rect, hub, rq, context);
                     self.children[index-1].resize(rect![rect.min.x, sb_rect.min.y - thickness,
                                                         rect.max.x, sb_rect.min.y],
-                                                  hub, context);
+                                                  hub, rq, context);
                     index += 2;
                 }
                 if self.children[index].is::<Keyboard>() {
@@ -3607,14 +3834,14 @@ impl View for Reader {
                                         rect.max.y - (small_height + 3 * big_height) as i32 + big_thickness,
                                         rect.max.x,
                                         rect.max.y - small_height - small_thickness];
-                    self.children[index].resize(kb_rect, hub, context);
+                    self.children[index].resize(kb_rect, hub, rq, context);
                     self.children[index+1].resize(rect![rect.min.x, kb_rect.max.y,
                                                         rect.max.x, kb_rect.max.y + thickness],
-                                                  hub, context);
+                                                  hub, rq, context);
                     let kb_rect = *self.children[index].rect();
                     self.children[index-1].resize(rect![rect.min.x, kb_rect.min.y - thickness,
                                                         rect.max.x, kb_rect.min.y],
-                                                  hub, context);
+                                                  hub, rq, context);
                     index += 2;
                 }
                 floating_layer_start = index;
@@ -3626,12 +3853,12 @@ impl View for Reader {
                                            rect.max.y - small_height - small_thickness,
                                            rect.max.x,
                                            rect.max.y - small_height + big_thickness];
-                self.children[index-1].resize(separator_rect, hub, context);
+                self.children[index-1].resize(separator_rect, hub, rq, context);
                 let bottom_bar_rect = rect![rect.min.x,
                                             rect.max.y - small_height + big_thickness,
                                             rect.max.x,
                                             rect.max.y];
-                self.children[index].resize(bottom_bar_rect, hub, context);
+                self.children[index].resize(bottom_bar_rect, hub, rq, context);
 
                 index -= 2;
 
@@ -3649,27 +3876,36 @@ impl View for Reader {
                                          y_max - bar_height + thickness,
                                          rect.max.x,
                                          y_max];
-                    self.children[index].resize(bar_rect, hub, context);
+                    self.children[index].resize(bar_rect, hub, rq, context);
                     let y_max = self.children[index].rect().min.y;
                     let sp_rect = rect![rect.min.x,
                                         y_max - thickness,
                                         rect.max.x,
                                         y_max];
-                    self.children[index-1].resize(sp_rect, hub, context);
+                    self.children[index-1].resize(sp_rect, hub, rq, context);
 
                     index -= 2;
                 }
             }
 
             for i in floating_layer_start..self.children.len() {
-                self.children[i].resize(rect, hub, context);
+                self.children[i].resize(rect, hub, rq, context);
             }
         }
 
-        if self.view_port.zoom_mode == ZoomMode::FitToWidth {
-            let ratio = (rect.width() as i32 - 2 * self.view_port.margin_width) as f32 /
-                        (self.rect.width() as i32 - 2 * self.view_port.margin_width) as f32;
-            self.view_port.top_offset = (self.view_port.top_offset as f32 * ratio) as i32;
+        match self.view_port.zoom_mode {
+            ZoomMode::FitToWidth => {
+                // Apply the scale change.
+                let ratio = (rect.width() as i32 - 2 * self.view_port.margin_width) as f32 /
+                            (self.rect.width() as i32 - 2 * self.view_port.margin_width) as f32;
+                self.view_port.page_offset.y = (self.view_port.page_offset.y as f32 * ratio) as i32;
+            },
+            ZoomMode::Custom(_) => {
+                // Keep the center still.
+                self.view_port.page_offset += pt!(self.rect.width() as i32 - rect.width() as i32,
+                                                  self.rect.height() as i32 - rect.height() as i32) / 2;
+            },
+            _ => (),
         }
 
         self.rect = rect;
@@ -3688,7 +3924,7 @@ impl View for Reader {
         }
 
         self.cache.clear();
-        self.update(Some(UpdateMode::Full), hub, context);
+        self.update(Some(UpdateMode::Full), hub, rq, context);
     }
 
     fn might_rotate(&self) -> bool {
@@ -3713,5 +3949,9 @@ impl View for Reader {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.children
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

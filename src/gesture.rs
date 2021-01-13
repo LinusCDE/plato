@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::sync::{Arc, Mutex};
 use fxhash::FxHashMap;
@@ -24,6 +25,11 @@ pub enum GestureEvent {
         start: Point,
         end: Point,
     },
+    SlantedSwipe {
+        dir: DiagDir,
+        start: Point,
+        end: Point,
+    },
     MultiSwipe {
         dir: Dir,
         starts: [Point; 2],
@@ -34,22 +40,30 @@ pub enum GestureEvent {
         start: Point,
         end: Point,
     },
+    MultiArrow {
+        dir: Dir,
+        starts: [Point; 2],
+        ends: [Point; 2],
+    },
     Corner {
         dir: DiagDir,
         start: Point,
         end: Point,
     },
-    Pinch {
-        axis: Axis,
-        strength: u32,
+    MultiCorner {
+        dir: DiagDir,
         starts: [Point; 2],
         ends: [Point; 2],
     },
+    Pinch {
+        axis: Axis,
+        center: Point,
+        factor: f32,
+    },
     Spread {
         axis: Axis,
-        strength: u32,
-        starts: [Point; 2],
-        ends: [Point; 2],
+        center: Point,
+        factor: f32,
     },
     Rotate {
         center: Point,
@@ -57,10 +71,36 @@ pub enum GestureEvent {
         angle: f32,
     },
     Cross(Point),
+    Diamond(Point),
     HoldFingerShort(Point, i32),
     HoldFingerLong(Point, i32),
     HoldButtonShort(ButtonCode),
     HoldButtonLong(ButtonCode),
+}
+
+impl fmt::Display for GestureEvent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            GestureEvent::Tap(pt) => write!(f, "Tap {}", pt),
+            GestureEvent::MultiTap(pts) => write!(f, "Multitap {} {}", pts[0], pts[1]),
+            GestureEvent::Swipe { dir, .. } => write!(f, "Swipe {}", dir),
+            GestureEvent::SlantedSwipe { dir, .. } => write!(f, "SlantedSwipe {}", dir),
+            GestureEvent::MultiSwipe { dir, .. } => write!(f, "Multiswipe {}", dir),
+            GestureEvent::Arrow { dir, .. } => write!(f, "Arrow {}", dir),
+            GestureEvent::MultiArrow { dir, .. } => write!(f, "Multiarrow {}", dir),
+            GestureEvent::Corner { dir, .. } => write!(f, "Corner {}", dir),
+            GestureEvent::MultiCorner { dir, .. } => write!(f, "Multicorner {}", dir),
+            GestureEvent::Pinch { axis, center, factor, .. } => write!(f, "Pinch {} {} {:.2}", axis, center, factor),
+            GestureEvent::Spread { axis, center, factor, .. } => write!(f, "Spread {} {} {:.2}", axis, center, factor),
+            GestureEvent::Rotate { center, quarter_turns, .. } => write!(f, "Rotate {} {}", center, *quarter_turns as i32 * 90),
+            GestureEvent::Cross(pt) => write!(f, "Cross {}", pt),
+            GestureEvent::Diamond(pt) => write!(f, "Diamond {}", pt),
+            GestureEvent::HoldFingerShort(pt, id) => write!(f, "Short-held finger {} {}", id, pt),
+            GestureEvent::HoldFingerLong(pt, id) => write!(f, "Long-held finger {} {}", id, pt),
+            GestureEvent::HoldButtonShort(code) => write!(f, "Short-held button {:?}", code),
+            GestureEvent::HoldButtonLong(code) => write!(f, "Long-held button {:?}", code),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -166,31 +206,69 @@ pub fn parse_gesture_events(rx: &Receiver<DeviceEvent>, ty: &Sender<Event>) {
                                     dir: d1,
                                     starts: [s1, s2],
                                     ends: [e1, e2],
-                                })).unwrap();
+                                })).ok();
                             },
                             (GestureEvent::Swipe { dir: d1, start: s1, end: e1, .. },
                              GestureEvent::Swipe { dir: d2, start: s2, end: e2, .. }) if d1 == d2.opposite() => {
+                                let center = (s1 + s2) / 2;
                                 let ds = (s2 - s1).length();
                                 let de = (e2 - e1).length();
-                                if ds > de {
+                                let factor = de / ds;
+                                if factor < 1.0 {
                                     ty.send(Event::Gesture(GestureEvent::Pinch {
                                         axis: d1.axis(),
-                                        starts: [s1, s2],
-                                        ends: [e1, e2],
-                                        strength: (ds - de) as u32,
-                                    })).unwrap();
+                                        center,
+                                        factor,
+                                    })).ok();
                                 } else {
                                     ty.send(Event::Gesture(GestureEvent::Spread {
                                         axis: d1.axis(),
-                                        starts: [s1, s2],
-                                        ends: [e1, e2],
-                                        strength: (de - ds) as u32,
-                                    })).unwrap();
+                                        center,
+                                        factor,
+                                    })).ok();
+                                }
+                            },
+                            (GestureEvent::SlantedSwipe { dir: d1, start: s1, end: e1, .. },
+                             GestureEvent::SlantedSwipe { dir: d2, start: s2, end: e2, .. }) if d1 == d2.opposite() => {
+                                let center = (s1 + s2) / 2;
+                                let ds = (s2 - s1).length();
+                                let de = (e2 - e1).length();
+                                let factor = de / ds;
+                                if factor < 1.0 {
+                                    ty.send(Event::Gesture(GestureEvent::Pinch {
+                                        axis: Axis::Diagonal,
+                                        center,
+                                        factor,
+                                    })).ok();
+                                } else {
+                                    ty.send(Event::Gesture(GestureEvent::Spread {
+                                        axis: Axis::Diagonal,
+                                        center,
+                                        factor,
+                                    })).ok();
                                 }
                             },
                             (GestureEvent::Arrow { dir: Dir::East, start: s1, end: e1 }, GestureEvent::Arrow { dir: Dir::West, start: s2, end: e2 }) |
                             (GestureEvent::Arrow { dir: Dir::West, start: s2, end: e2 }, GestureEvent::Arrow { dir: Dir::East, start: s1, end: e1 }) if s1.x < s2.x => {
                                 ty.send(Event::Gesture(GestureEvent::Cross((s1+e1+s2+e2)/4))).ok();
+                            },
+                            (GestureEvent::Arrow { dir: Dir::West, start: s1, end: e1 }, GestureEvent::Arrow { dir: Dir::East, start: s2, end: e2 }) |
+                            (GestureEvent::Arrow { dir: Dir::East, start: s2, end: e2 }, GestureEvent::Arrow { dir: Dir::West, start: s1, end: e1 }) if s1.x < s2.x => {
+                                ty.send(Event::Gesture(GestureEvent::Diamond((s1+e1+s2+e2)/4))).ok();
+                            },
+                            (GestureEvent::Arrow { dir: d1, start: s1, end: e1 }, GestureEvent::Arrow { dir: d2, start: s2, end: e2 }) if d1 == d2 => {
+                                ty.send(Event::Gesture(GestureEvent::MultiArrow {
+                                    dir: d1,
+                                    starts: [s1, s2],
+                                    ends: [e1, e2],
+                                })).ok();
+                            },
+                            (GestureEvent::Corner { dir: d1, start: s1, end: e1 }, GestureEvent::Corner { dir: d2, start: s2, end: e2 }) if d1 == d2 => {
+                                ty.send(Event::Gesture(GestureEvent::MultiCorner {
+                                    dir: d1,
+                                    starts: [s1, s2],
+                                    ends: [e1, e2],
+                                })).ok();
                             },
                             (GestureEvent::Tap(c), GestureEvent::Swipe { start: s, end: e, .. }) |
                             (GestureEvent::Swipe { start: s, end: e, .. }, GestureEvent::Tap(c)) |
@@ -205,7 +283,7 @@ pub fn parse_gesture_events(rx: &Receiver<DeviceEvent>, ty: &Sender<Event>) {
                                     angle,
                                     quarter_turns,
                                     center: c,
-                                })).unwrap();
+                                })).ok();
                             },
                             _ => (),
                         }
@@ -281,10 +359,19 @@ fn interpret_segment(sp: &[Point], tap_jitter: f32) -> GestureEvent {
                 }
             }
         } else {
-            GestureEvent::Swipe {
-                start: a,
-                end: b,
-                dir: ab.dir(),
+            let g = (ab.x as f32 / ab.y as f32).abs();
+            if g < 0.5 || g > 2.0 {
+                GestureEvent::Swipe {
+                    start: a,
+                    end: b,
+                    dir: ab.dir(),
+                }
+            } else {
+                GestureEvent::SlantedSwipe {
+                    start: a,
+                    end: b,
+                    dir: ab.diag_dir(),
+                }
             }
         }
     }

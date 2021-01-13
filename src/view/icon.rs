@@ -3,13 +3,12 @@ use fxhash::FxHashMap;
 use lazy_static::lazy_static;
 use crate::device::CURRENT_DEVICE;
 use crate::framebuffer::{Framebuffer, Pixmap, UpdateMode};
-use super::{View, Event, Hub, Bus, ViewId, Align};
-use super::BORDER_RADIUS_SMALL;
+use super::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, ViewId, Align};
 use crate::gesture::GestureEvent;
 use crate::input::{DeviceEvent, FingerStatus};
 use crate::document::pdf::PdfOpener;
 use crate::color::{TEXT_NORMAL, TEXT_INVERTED_HARD};
-use crate::unit::{scale_by_dpi, scale_by_dpi_raw};
+use crate::unit::scale_by_dpi_raw;
 use crate::geom::{Rectangle, CornerSpec};
 use crate::font::Fonts;
 use crate::app::Context;
@@ -25,11 +24,10 @@ lazy_static! {
                      "angle-left", "angle-right", "angle-left-small", "angle-right-small",
                      "return", "shift", "combine", "alternate", "delete-backward", "delete-forward",
                      "move-backward", "move-backward-short", "move-forward", "move-forward-short",
-                     "close",  "check_mark-small", "check_mark","check_mark-large", "bullet",
-                     "arrow-left", "arrow-right", "double_angle-left", "double_angle-right",
-                     "angle-down", "angle-up", "plus", "minus", "crop", "toc", "font_family",
+                     "close",  "check_mark-small", "check_mark", "check_mark-large", "bullet",
+                     "arrow-left", "arrow-right", "angle-down", "angle-up", "crop", "toc", "font_family",
                      "font_size", "line_height", "align-justify", "align-left", "align-right",
-                     "align-center", "margin", "plug", "ellipsis", "contrast", "gray"].iter().cloned() {
+                     "align-center", "margin", "plug", "enclosed_menu", "contrast", "gray"].iter().cloned() {
             let path = dir.join(&format!("{}.svg", name));
             let doc = PdfOpener::new().and_then(|o| o.open(path)).unwrap();
             let pixmap = doc.page(0).and_then(|p| p.pixmap(scale)).unwrap();
@@ -40,6 +38,7 @@ lazy_static! {
 }
 
 pub struct Icon {
+    id: Id,
     pub rect: Rectangle,
     children: Vec<Box<dyn View>>,
     pub name: String,
@@ -47,12 +46,13 @@ pub struct Icon {
     align: Align,
     corners: Option<CornerSpec>,
     event: Event,
-    active: bool,
+    pub active: bool,
 }
 
 impl Icon {
     pub fn new(name: &str, rect: Rectangle, event: Event) -> Icon {
         Icon {
+            id: ID_FEEDER.next(),
             rect,
             children: vec![],
             name: name.to_string(),
@@ -81,18 +81,18 @@ impl Icon {
 }
 
 impl View for Icon {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, _context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
         match *evt {
             Event::Device(DeviceEvent::Finger { status, position, .. }) => {
                 match status {
                     FingerStatus::Down if self.rect.includes(position) => {
                         self.active = true;
-                        hub.send(Event::Render(self.rect, UpdateMode::Fast)).ok();
+                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Fast));
                         true
                     },
                     FingerStatus::Up if self.active => {
                         self.active = false;
-                        hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                         true
                     },
                     _ => false,
@@ -123,8 +123,6 @@ impl View for Icon {
     }
 
     fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, _fonts: &mut Fonts) {
-        let dpi = CURRENT_DEVICE.dpi;
-
         let scheme = if self.active {
             TEXT_INVERTED_HARD
         } else {
@@ -136,23 +134,22 @@ impl View for Icon {
         let dy = (self.rect.height() as i32 - pixmap.height as i32) / 2;
         let pt = self.rect.min + pt!(dx, dy);
 
-        if let Some(ref cs) = self.corners {
-            fb.draw_rounded_rectangle(&self.rect, cs, self.background);
+        let background = if self.active {
+            scheme[0]
         } else {
-            fb.draw_rectangle(&self.rect, self.background);
-        }
+            self.background
+        };
 
-        if self.active {
-            let padding = ((self.rect.width() as i32 - pixmap.width as i32).min(self.rect.height() as i32 - pixmap.height as i32) / 3).max(1);
-            let bg_rect = rect![pt - padding, pt + pt!(pixmap.width as i32, pixmap.height as i32) + padding];
-            let border_radius = scale_by_dpi(BORDER_RADIUS_SMALL, dpi) as i32;
-            fb.draw_rounded_rectangle(&bg_rect, &CornerSpec::Uniform(border_radius), scheme[0]);
+        if let Some(ref cs) = self.corners {
+            fb.draw_rounded_rectangle(&self.rect, cs, background);
+        } else {
+            fb.draw_rectangle(&self.rect, background);
         }
 
         fb.draw_blended_pixmap(pixmap, pt, scheme[1]);
     }
 
-    fn resize(&mut self, rect: Rectangle, _hub: &Hub, _context: &mut Context) {
+    fn resize(&mut self, rect: Rectangle, _hub: &Hub, _rq: &mut RenderQueue, _context: &mut Context) {
         if let Event::ToggleNear(_, ref mut event_rect) = self.event {
             *event_rect = rect;
         }
@@ -173,5 +170,9 @@ impl View for Icon {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.children
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

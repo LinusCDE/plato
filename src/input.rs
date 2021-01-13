@@ -64,11 +64,18 @@ pub const KEY_HOME: u16 = ecodes::KEY_HOME;
 pub const KEY_LIGHT: u16 = 90; // Unused on reMarkable
 pub const KEY_BACKWARD: u16 = ecodes::KEY_LEFT;
 pub const KEY_FORWARD: u16 = ecodes::KEY_RIGHT;
+
+// ---
+// TODO: Attempt integration / test
+pub const SLEEP_COVER: u16 = 59;
+// Synthetic touch button
+pub const BTN_TOUCH: u16 = 330;
+// ---
+
 // The following key codes are fake, and are used to support
 // software toggles within this design
 pub const KEY_ROTATE_DISPLAY: u16 = 0xffff;
 pub const KEY_BUTTON_SCHEME: u16 = 0xfffe;
-pub const SLEEP_COVER: u16 = 59;
 
 pub struct InputFilterCommand {
     pub path: String,
@@ -638,7 +645,7 @@ pub fn parse_device_events(
                     //}
                     rotation = next_rotation;
                 }
-            } else {
+            } else if evt.code != BTN_TOUCH {
                 if let Some(button_status) = ButtonStatus::try_from_raw(evt.value) {
                     ty.send(DeviceEvent::Button {
                         time: seconds(evt.time),

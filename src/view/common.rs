@@ -5,7 +5,7 @@ use crate::device::CURRENT_DEVICE;
 use crate::settings::{ButtonScheme, RotationLock, InputSource};
 use crate::framebuffer::UpdateMode;
 use crate::geom::{Point, Rectangle};
-use super::{View, Event, Hub, ViewId, AppCmd, EntryId, EntryKind};
+use super::{View, RenderQueue, RenderData, ViewId, AppCmd, EntryId, EntryKind};
 use super::menu::{Menu, MenuKind};
 use super::notification::Notification;
 use crate::app::Context;
@@ -38,7 +38,7 @@ pub fn rlocate<T: View>(view: &dyn View) -> Option<usize> {
 }
 
 pub fn locate_by_id(view: &dyn View, id: ViewId) -> Option<usize> {
-    view.children().iter().position(|c| c.id().map_or(false, |i| i == id))
+    view.children().iter().position(|c| c.view_id().map_or(false, |i| i == id))
 }
 
 pub fn overlapping_rectangle(view: &dyn View) -> Rectangle {
@@ -50,25 +50,25 @@ pub fn overlapping_rectangle(view: &dyn View) -> Rectangle {
 }
 
 // Transfer the notifications from the view1 to the view2.
-pub fn transfer_notifications(view1: &mut dyn View, view2: &mut dyn View, context: &mut Context) {
+pub fn transfer_notifications(view1: &mut dyn View, view2: &mut dyn View, rq: &mut RenderQueue, context: &mut Context) {
     for index in (0..view1.len()).rev() {
         if view1.child(index).is::<Notification>() {
             let mut child = view1.children_mut().remove(index);
             if view2.rect() != view1.rect() {
                 let (tx, _rx) = mpsc::channel();
-                child.resize(*view2.rect(), &tx, context);
+                child.resize(*view2.rect(), &tx, rq, context);
             }
             view2.children_mut().push(child);
         }
     }
 }
 
-pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
     if let Some(index) = locate_by_id(view, ViewId::MainMenu) {
         if let Some(true) = enable {
             return;
         }
-        hub.send(Event::Expose(*view.child(index).rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::expose(*view.child(index).rect(), UpdateMode::Gui));
         view.children_mut().remove(index);
     } else {
         if let Some(false) = enable {
@@ -91,8 +91,12 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                         EntryKind::Command("Calculator".to_string(),
                                            EntryId::Launch(AppCmd::Calculator)),
                         EntryKind::Command("Sketch".to_string(),
-                                           EntryId::Launch(AppCmd::Sketch))];
-
+                        EntryId::Launch(AppCmd::Sketch)),
+                        EntryKind::Separator,
+                        EntryKind::Command("Touch Events".to_string(),
+                                           EntryId::Launch(AppCmd::TouchEvents)),
+                        EntryKind::Command("Rotation Values".to_string(),
+                                           EntryId::Launch(AppCmd::RotationValues))];
         let mut refresh_qualities = vec![EntryKind::RadioButton("Fast".to_string(),
                                            EntryId::RefreshQuality(RefreshQuality::Fast),
                                            context.settings.remarkable.refresh_quality == RefreshQuality::Fast),
@@ -138,7 +142,12 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                                    EntryId::TakeScreenshot),
                                EntryKind::Separator,
                                EntryKind::SubMenu("Applications".to_string(), apps),
-                               EntryKind::Separator];
+                               EntryKind::Separator,
+                               EntryKind::Command("About".to_string(),
+                                                  EntryId::About),
+                               EntryKind::Command("System Info".to_string(),
+                                                  EntryId::SystemInfo),
+                                                ];
 
         if env::var_os("PLATO_STANDALONE").is_some() {
             entries.push(EntryKind::Command("Reboot in Nickel".to_string(), EntryId::RebootInNickel));
@@ -180,17 +189,17 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
         }
 
         let main_menu = Menu::new(rect, ViewId::MainMenu, MenuKind::DropDown, entries, context);
-        hub.send(Event::Render(*main_menu.rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::new(main_menu.id(), *main_menu.rect(), UpdateMode::Gui));
         view.children_mut().push(Box::new(main_menu) as Box<dyn View>);
     }
 }
 
-pub fn toggle_battery_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+pub fn toggle_battery_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
     if let Some(index) = locate_by_id(view, ViewId::BatteryMenu) {
         if let Some(true) = enable {
             return;
         }
-        hub.send(Event::Expose(*view.child(index).rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::expose(*view.child(index).rect(), UpdateMode::Gui));
         view.children_mut().remove(index);
     } else {
         if let Some(false) = enable {
@@ -204,36 +213,36 @@ pub fn toggle_battery_menu(view: &mut dyn View, rect: Rectangle, enable: Option<
         };
         let entries = vec![EntryKind::Message(text)];
         let battery_menu = Menu::new(rect, ViewId::BatteryMenu, MenuKind::DropDown, entries, context);
-        hub.send(Event::Render(*battery_menu.rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::new(battery_menu.id(), *battery_menu.rect(), UpdateMode::Gui));
         view.children_mut().push(Box::new(battery_menu) as Box<dyn View>);
     }
 }
 
-pub fn toggle_clock_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+pub fn toggle_clock_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
     if let Some(index) = locate_by_id(view, ViewId::ClockMenu) {
         if let Some(true) = enable {
             return;
         }
-        hub.send(Event::Expose(*view.child(index).rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::expose(*view.child(index).rect(), UpdateMode::Gui));
         view.children_mut().remove(index);
     } else {
         if let Some(false) = enable {
             return;
         }
-        let text = Local::now().format("%A, %B %-d, %Y").to_string();
+        let text = Local::now().format(&context.settings.date_format).to_string();
         let entries = vec![EntryKind::Message(text)];
         let clock_menu = Menu::new(rect, ViewId::ClockMenu, MenuKind::DropDown, entries, context);
-        hub.send(Event::Render(*clock_menu.rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::new(clock_menu.id(), *clock_menu.rect(), UpdateMode::Gui));
         view.children_mut().push(Box::new(clock_menu) as Box<dyn View>);
     }
 }
 
-pub fn toggle_input_history_menu(view: &mut dyn View, id: ViewId, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+pub fn toggle_input_history_menu(view: &mut dyn View, id: ViewId, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
     if let Some(index) = locate_by_id(view, ViewId::InputHistoryMenu) {
         if let Some(true) = enable {
             return;
         }
-        hub.send(Event::Expose(*view.child(index).rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::expose(*view.child(index).rect(), UpdateMode::Gui));
         view.children_mut().remove(index);
     } else {
         if let Some(false) = enable {
@@ -253,18 +262,18 @@ pub fn toggle_input_history_menu(view: &mut dyn View, id: ViewId, rect: Rectangl
                 _ => MenuKind::Contextual,
             };
             let input_history_menu = Menu::new(rect, ViewId::InputHistoryMenu, menu_kind, entries, context);
-            hub.send(Event::Render(*input_history_menu.rect(), UpdateMode::Gui)).ok();
+            rq.add(RenderData::new(input_history_menu.id(), *input_history_menu.rect(), UpdateMode::Gui));
             view.children_mut().push(Box::new(input_history_menu) as Box<dyn View>);
         }
     }
 }
 
-pub fn toggle_keyboard_layout_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, hub: &Hub, context: &mut Context) {
+pub fn toggle_keyboard_layout_menu(view: &mut dyn View, rect: Rectangle, enable: Option<bool>, rq: &mut RenderQueue, context: &mut Context) {
     if let Some(index) = locate_by_id(view, ViewId::KeyboardLayoutMenu) {
         if let Some(true) = enable {
             return;
         }
-        hub.send(Event::Expose(*view.child(index).rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::expose(*view.child(index).rect(), UpdateMode::Gui));
         view.children_mut().remove(index);
     } else {
         if let Some(false) = enable {
@@ -275,7 +284,7 @@ pub fn toggle_keyboard_layout_menu(view: &mut dyn View, rect: Rectangle, enable:
                                                          EntryId::SetKeyboardLayout(s.to_string())))
                              .collect::<Vec<EntryKind>>();
         let keyboard_layout_menu = Menu::new(rect, ViewId::KeyboardLayoutMenu, MenuKind::Contextual, entries, context);
-        hub.send(Event::Render(*keyboard_layout_menu.rect(), UpdateMode::Gui)).ok();
+        rq.add(RenderData::new(keyboard_layout_menu.id(), *keyboard_layout_menu.rect(), UpdateMode::Gui));
         view.children_mut().push(Box::new(keyboard_layout_menu) as Box<dyn View>);
     }
 }

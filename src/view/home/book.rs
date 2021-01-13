@@ -1,6 +1,7 @@
+use std::path::PathBuf;
 use crate::device::CURRENT_DEVICE;
 use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, THICKNESS_SMALL};
+use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, THICKNESS_SMALL};
 use crate::font::{MD_TITLE, MD_AUTHOR, MD_YEAR, MD_KIND, MD_SIZE};
 use crate::color::{BLACK, WHITE, READING_PROGRESS};
 use crate::color::{TEXT_NORMAL, TEXT_INVERTED_HARD};
@@ -8,7 +9,8 @@ use crate::gesture::GestureEvent;
 use crate::metadata::{Info, Status};
 use crate::settings::{FirstColumn, SecondColumn};
 use crate::unit::scale_by_dpi;
-use crate::document::HumanSize;
+use crate::document::{HumanSize, Location, Document};
+use crate::document::pdf::PdfOpener;
 use crate::font::{Fonts, font_from_style};
 use crate::geom::{Rectangle, CornerSpec, BorderSpec, halves};
 use crate::app::Context;
@@ -16,35 +18,40 @@ use crate::app::Context;
 const PROGRESS_HEIGHT: f32 = 13.0;
 
 pub struct Book {
+    id: Id,
     rect: Rectangle,
     children: Vec<Box<dyn View>>,
     info: Info,
     index: usize,
     first_column: FirstColumn,
     second_column: SecondColumn,
+    preview_path: Option<PathBuf>,
     active: bool,
 }
 
 impl Book {
-    pub fn new(rect: Rectangle, info: Info, index: usize, first_column: FirstColumn, second_column: SecondColumn) -> Book {
+    pub fn new(rect: Rectangle, info: Info, index: usize,
+               first_column: FirstColumn, second_column: SecondColumn, preview_path: Option<PathBuf>) -> Book {
         Book {
+            id: ID_FEEDER.next(),
             rect,
             children: vec![],
             info,
             index,
             first_column,
             second_column,
+            preview_path,
             active: false,
         }
     }
 }
 
 impl View for Book {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, _context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 self.active = true;
-                hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                 hub.send(Event::Open(Box::new(self.info.clone()))).ok();
                 true
             },
@@ -53,10 +60,19 @@ impl View for Book {
                 bus.push_back(Event::ToggleBookMenu(Rectangle::from_point(pt), self.index));
                 true
             },
-            Event::Invalid(ref info) => {
-                if self.info.file.path == info.file.path {
+            Event::RefreshBookPreview(ref path, ref preview_path) => {
+                if self.info.file.path == *path {
+                    self.preview_path = preview_path.clone();
+                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                    true
+                } else {
+                    false
+                }
+            },
+            Event::Invalid(ref path) => {
+                if self.info.file.path == *path {
                     self.active = false;
-                    hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                     true
                 } else {
                     false
@@ -96,15 +112,43 @@ impl View for Book {
         };
 
         let (small_half_padding, big_half_padding) = halves(padding);
-        let first_width = 3 * self.rect.width() as i32 / 4;
-        let second_width = (self.rect.width() as i32 - first_width) / 2;
-        let width = first_width - padding - small_half_padding;
+        let third_width = 6 * x_height;
+        let second_width = 8 * x_height;
+        let first_width = self.rect.width() as i32 - second_width - third_width;
+        let mut width = first_width - padding - small_half_padding;
+        let mut start_x = self.rect.min.x + padding;
+
+        // Preview
+        if let Some(preview_path) = self.preview_path.as_ref() {
+            let th = self.rect.height() as i32 - x_height;
+            let tw = 3 * th / 4;
+
+            if preview_path.exists() {
+                PdfOpener::new().and_then(|opener| {
+                    opener.open(preview_path)
+                }).and_then(|mut doc| {
+                    doc.dims(0).and_then(|dims| {
+                        let scale = (tw as f32 / dims.0).min(th as f32 / dims.1);
+                        doc.pixmap(Location::Exact(0), scale)
+                    })
+                }).map(|(pixmap, _)| {
+                    let dx = (tw - pixmap.width as i32) / 2;
+                    let dy = (th - pixmap.height as i32) / 2;
+                    let pt = pt!(self.rect.min.x + padding + dx,
+                                 self.rect.min.y + x_height / 2 + dy);
+                    fb.draw_pixmap(&pixmap, pt);
+                });
+            }
+
+            width -= tw + padding;
+            start_x += tw + padding;
+        }
 
         // Author
         let author_width = {
             let font = font_from_style(fonts, &MD_AUTHOR, dpi);
             let plan = font.plan(author, Some(width), None);
-            let pt = pt!(self.rect.min.x + padding, self.rect.max.y - baseline);
+            let pt = pt!(start_x, self.rect.max.y - baseline);
             font.render(fb, scheme[1], &plan, pt);
             plan.width
         };
@@ -143,7 +187,7 @@ impl View for Book {
                 baseline + x_height
             };
 
-            let pt = self.rect.min + pt!(padding, dy);
+            let pt = pt!(start_x, self.rect.min.y + dy);
             font.render(fb, scheme[1], &plan, pt);
         }
 
@@ -225,5 +269,9 @@ impl View for Book {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.children
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

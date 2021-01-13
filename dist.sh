@@ -21,6 +21,7 @@ cp libs/libjbig2dec.so dist/libs/libjbig2dec.so.0
 cp libs/libfreetype.so dist/libs/libfreetype.so.6
 cp libs/libharfbuzz.so dist/libs/libharfbuzz.so.0
 
+cp libs/libgumbo.so dist/libs/libgumbo.so.1
 cp libs/libdjvulibre.so dist/libs/libdjvulibre.so.21
 cp libs/libmupdf.so dist/libs
 
@@ -36,6 +37,7 @@ find dist/keyboard-layouts -name '*-user.json' -delete
 find dist/hyphenation-patterns -name '*.bounds' -delete
 cp target/armv7-unknown-linux-gnueabihf/release/plato dist/
 cp contrib/*.sh dist
+cp LICENSE-AGPLv3 dist
 
 patchelf --remove-rpath dist/libs/*
 

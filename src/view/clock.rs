@@ -1,7 +1,7 @@
 use chrono::{Local, DateTime};
 use crate::device::CURRENT_DEVICE;
 use crate::framebuffer::{Framebuffer, UpdateMode};
-use super::{View, ViewId, Event, Hub, Bus};
+use super::{View, ViewId, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData};
 use crate::gesture::GestureEvent;
 use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
 use crate::color::{BLACK, WHITE};
@@ -9,30 +9,36 @@ use crate::geom::{Rectangle};
 use crate::app::Context;
 
 pub struct Clock {
+    id: Id,
     rect: Rectangle,
     children: Vec<Box<dyn View>>,
+    format: String,
     time: DateTime<Local>,
 }
 
 impl Clock {
-    pub fn new(rect: &mut Rectangle, fonts: &mut Fonts) -> Clock {
-        let font = font_from_style(fonts, &NORMAL_STYLE, CURRENT_DEVICE.dpi);
-        let width = font.plan("00:00", None, None).width + font.em() as i32;
+    pub fn new(rect: &mut Rectangle, context: &mut Context) -> Clock {
+        let time = Local::now();
+        let format = context.settings.time_format.clone();
+        let font = font_from_style(&mut context.fonts, &NORMAL_STYLE, CURRENT_DEVICE.dpi);
+        let width = font.plan(&time.format(&format).to_string(), None, None).width + font.em() as i32;
         rect.min.x = rect.max.x - width;
         Clock {
+            id: ID_FEEDER.next(),
             rect: *rect,
             children: vec![],
-            time: Local::now(),
+            format,
+            time,
         }
     }
 }
 
 impl View for Clock {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, _context: &mut Context) -> bool {
+    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
         match *evt {
             Event::ClockTick => {
                 self.time = Local::now();
-                hub.send(Event::Render(self.rect, UpdateMode::Gui)).ok();
+                rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
                 true
             },
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
@@ -46,7 +52,7 @@ impl View for Clock {
     fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
         let dpi = CURRENT_DEVICE.dpi;
         let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
-        let plan = font.plan(&self.time.format("%H:%M").to_string(), None, None);
+        let plan = font.plan(&self.time.format(&self.format).to_string(), None, None);
         let dx = (self.rect.width() as i32 - plan.width) / 2;
         let dy = (self.rect.height() as i32 - font.x_heights.0 as i32) / 2;
         let pt = pt!(self.rect.min.x + dx, self.rect.max.y - dy);
@@ -69,5 +75,9 @@ impl View for Clock {
 
     fn children_mut(&mut self) -> &mut Vec<Box<dyn View>> {
         &mut self.children
+    }
+
+    fn id(&self) -> Id {
+        self.id
     }
 }

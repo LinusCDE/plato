@@ -1,3 +1,4 @@
+use std::fmt;
 use serde::{Serialize, Deserialize};
 use std::cmp::Ordering;
 use std::f32::consts;
@@ -11,6 +12,34 @@ pub enum Dir {
     West,
 }
 
+impl Dir {
+    pub fn opposite(self) -> Dir {
+        match self {
+            Dir::North => Dir::South,
+            Dir::South => Dir::North,
+            Dir::East => Dir::West,
+            Dir::West => Dir::East,
+        }
+    }
+    pub fn axis(self) -> Axis {
+        match self {
+            Dir::North | Dir::South => Axis::Vertical,
+            Dir::East | Dir::West => Axis::Horizontal,
+        }
+    }
+}
+
+impl fmt::Display for Dir {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Dir::North => write!(f, "north"),
+            Dir::East => write!(f, "east"),
+            Dir::South => write!(f, "south"),
+            Dir::West => write!(f, "west"),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum DiagDir {
     NorthWest,
@@ -19,10 +48,43 @@ pub enum DiagDir {
     SouthWest,
 }
 
+impl DiagDir {
+    pub fn opposite(self) -> DiagDir {
+        match self {
+            DiagDir::NorthWest => DiagDir::SouthEast,
+            DiagDir::NorthEast => DiagDir::SouthWest,
+            DiagDir::SouthEast => DiagDir::NorthWest,
+            DiagDir::SouthWest => DiagDir::NorthEast,
+        }
+    }
+}
+
+impl fmt::Display for DiagDir {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DiagDir::NorthWest => write!(f, "northwest"),
+            DiagDir::NorthEast => write!(f, "northeast"),
+            DiagDir::SouthEast => write!(f, "southeast"),
+            DiagDir::SouthWest => write!(f, "southwest"),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Axis {
     Horizontal,
     Vertical,
+    Diagonal,
+}
+
+impl fmt::Display for Axis {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Axis::Horizontal => write!(f, "horizontal"),
+            Axis::Vertical => write!(f, "vertical"),
+            Axis::Diagonal => write!(f, "diagonal"),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -46,7 +108,7 @@ impl LinearDir {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
@@ -56,6 +118,12 @@ pub struct Point {
 macro_rules! pt {
     ($x:expr, $y:expr $(,)* ) => ($crate::geom::Point::new($x, $y));
     ($a:expr) => ($crate::geom::Point::new($a, $a));
+}
+
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "({}, {})", self.x, self.y)
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -282,23 +350,6 @@ pub fn circular_distances(a: u16, mut b: u16, p: u16) -> (u16, u16) {
     (d0, d1)
 }
 
-impl Dir {
-    pub fn opposite(self) -> Dir {
-        match self {
-            Dir::North => Dir::South,
-            Dir::South => Dir::North,
-            Dir::East => Dir::West,
-            Dir::West => Dir::East,
-        }
-    }
-    pub fn axis(self) -> Axis {
-        match self {
-            Dir::North | Dir::South => Axis::Vertical,
-            Dir::East | Dir::West => Axis::Horizontal,
-        }
-    }
-}
-
 impl Point {
     pub fn new(x: i32, y: i32) -> Point {
         Point { x, y }
@@ -482,6 +533,12 @@ macro_rules! rect {
     ($min:expr, $max:expr $(,)* ) => ($crate::geom::Rectangle::new($min, $max));
 }
 
+impl fmt::Display for Rectangle {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[{}, {}, {}, {}]", self.min.x, self.min.y, self.max.x, self.max.y)
+    }
+}
+
 impl Rectangle {
     pub fn new(min: Point, max: Point) -> Rectangle {
         Rectangle {
@@ -539,6 +596,15 @@ impl Rectangle {
     pub fn overlaps(&self, rect: &Rectangle) -> bool {
         self.min.x < rect.max.x && rect.min.x < self.max.x &&
         self.min.y < rect.max.y && rect.min.y < self.max.y
+    }
+
+    pub fn touches(&self, rect: &Rectangle) -> bool {
+        ((self.min.x == rect.max.x || self.max.x == rect.min.x ||
+          self.min.x == rect.min.x || self.max.x == rect.max.x) &&
+         (self.max.y >= rect.min.y && self.min.y <= rect.max.y)) ||
+        ((self.min.y == rect.max.y || self.max.y == rect.min.y ||
+          self.min.y == rect.min.y || self.max.y == rect.max.y) &&
+         (self.max.x >= rect.min.x && self.min.x <= rect.max.x))
     }
 
     pub fn merge(&mut self, pt: Point) {
@@ -1162,6 +1228,80 @@ impl DivAssign<f32> for Boundary {
         self.max /= rhs;
     }
 }
+
+#[derive(Debug, Copy, Clone)]
+pub enum Region {
+    Corner(DiagDir),
+    Strip(Dir),
+    Center,
+}
+
+impl Region {
+    // pt ∈ rect
+    // 0.0 < {corner,strip}_width < 1.0
+    pub fn from_point(pt: Point, rect: Rectangle, strip_width: f32, corner_width: f32) -> Region {
+        let w = rect.width() as i32;
+        let h = rect.height() as i32;
+        let m = w.min(h) as f32 / 2.0;
+
+        let d = (m * corner_width).max(1.0) as i32;
+        let x1 = rect.min.x + d - 1;
+        let x2 = rect.max.x - d;
+
+        // The four corners are on top of all the other regions.
+        if pt.x <= x1 {
+            let dx = x1 - pt.x;
+            if pt.y <= rect.min.y + dx {
+                return Region::Corner(DiagDir::NorthWest);
+            } else if pt.y >= rect.max.y - 1 - dx {
+                return Region::Corner(DiagDir::SouthWest);
+            }
+        } else if pt.x >= x2 {
+            let dx = pt.x - x2;
+            if pt.y <= rect.min.y + dx {
+                return Region::Corner(DiagDir::NorthEast);
+            } else if pt.y >= rect.max.y - 1 - dx {
+                return Region::Corner(DiagDir::SouthEast);
+            }
+        }
+
+        let d = (m * strip_width).max(1.0) as i32;
+        let x1 = rect.min.x + d - 1;
+        let x2 = rect.max.x - d;
+        let y1 = rect.min.y + d - 1;
+        let y2 = rect.max.y - d;
+
+        // The four strips are above the center region.
+        // Each of the diagonals between the strips has to belong to one of the strip.
+        if pt.x <= x1 {
+            let dx = pt.x - rect.min.x;
+            if pt.y >= rect.min.y + dx && pt.y < rect.max.y - 1 - dx {
+                return Region::Strip(Dir::West);
+            }
+        } else if pt.x >= x2 {
+            let dx = rect.max.x - 1 - pt.x;
+            if pt.y > rect.min.y + dx && pt.y <= rect.max.y - 1 - dx {
+                return Region::Strip(Dir::East);
+            }
+        }
+
+        if pt.y <= y1 {
+            let dy = pt.y - rect.min.y;
+            if pt.x > rect.min.x + dy && pt.y <= rect.max.x - 1 - dy {
+                return Region::Strip(Dir::North);
+            }
+        } else if pt.y >= y2 {
+            let dy = rect.max.y - 1 - pt.y;
+            if pt.x >= rect.min.x + dy && pt.x < rect.max.x - 1 - dy {
+                return Region::Strip(Dir::South);
+            }
+        }
+
+        // The center rectangle is below everything else.
+        Region::Center
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

@@ -23,8 +23,11 @@ case "$method" in
 		ln -s libfreetype.so.6 libfreetype.so
 		ln -s libharfbuzz.so.0 libharfbuzz.so
 
+		ln -s libgumbo.so.1 libgumbo.so
 		ln -s libdjvulibre.so.21 libdjvulibre.so
 
+		cd ../thirdparty
+		./download.sh mupdf
 		cd ..
 		;;
 
@@ -48,6 +51,7 @@ case "$method" in
 		cp thirdparty/freetype2/objs/.libs/libfreetype.so libs
 		cp thirdparty/harfbuzz/src/.libs/libharfbuzz.so libs
 
+		cp thirdparty/gumbo/.libs/libgumbo.so libs
 		cp thirdparty/djvulibre/libdjvu/.libs/libdjvulibre.so libs
 		cp thirdparty/mupdf/build/release/libmupdf.so libs
 		;;

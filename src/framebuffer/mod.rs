@@ -19,7 +19,7 @@ pub struct Display {
     pub rotation: i8,
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum UpdateMode {
     Gui,
     Partial,

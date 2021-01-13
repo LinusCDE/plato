@@ -86,8 +86,8 @@ pub fn load_toml<T, P: AsRef<Path>>(path: P) -> Result<T, Error> where for<'a> T
 }
 
 pub fn save_toml<T, P: AsRef<Path>>(data: &T, path: P) -> Result<(), Error> where T: Serialize {
-    let s = toml::to_string(data)
-                 .context("Cannot convert to TOML format.")?;
+    let s = toml::Value::try_from(data)
+                      .context("Cannot convert to TOML format.")?.to_string();
     fs::write(path.as_ref(), &s)
        .with_context(|| format!("Cannot write to file {}.", path.as_ref().display()))
        .map_err(Into::into)

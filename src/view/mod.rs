@@ -58,7 +58,7 @@ use crate::settings::{ButtonScheme, FirstColumn, SecondColumn, RotationLock, Ref
 use crate::metadata::{Info, ZoomMode, SortMethod, TextAlign, SimpleStatus, PageScheme, Margin};
 use crate::geom::{LinearDir, CycleDir, Rectangle, Boundary};
 use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::input::{DeviceEvent, FingerStatus};
+use crate::input::{DeviceEvent, FingerStatus, ButtonCode};
 use crate::gesture::GestureEvent;
 use self::calculator::LineOrigin;
 use self::key::KeyKind;
@@ -553,6 +553,7 @@ pub enum EntryId {
     ToggleMonochrome,
     RefreshQuality(RefreshQuality),
     ToggleInputSource(InputSource),
+    ToggleIgnoreButtonCode(ButtonCode),
     ToggleWifi,
     Rotate(i8),
     Launch(AppCmd),

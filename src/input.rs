@@ -6,6 +6,7 @@ use anyhow::{Context, Error};
 use libremarkable::device::CURRENT_DEVICE as CURRENT_LIBREMARKABLE_DEVICE;
 use libremarkable::framebuffer::common;
 use libremarkable::input::{ecodes, rotate, InputDevice};
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -147,7 +148,7 @@ impl ButtonStatus {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ButtonCode {
     Power,
     Home,
@@ -396,9 +397,11 @@ pub fn device_events(
     rx: Receiver<InputEvent>,
     display: Display,
     button_scheme: ButtonScheme,
+    ignored_buttoncodes: Vec<ButtonCode>,
+    ignored_buttoncodes_rx: Receiver<Vec<ButtonCode>>,
 ) -> Receiver<DeviceEvent> {
     let (ty, ry) = mpsc::channel();
-    thread::spawn(move || parse_device_events(&rx, &ty, display, button_scheme));
+    thread::spawn(move || parse_device_events(&rx, &ty, display, button_scheme, ignored_buttoncodes, ignored_buttoncodes_rx));
     ry
 }
 
@@ -497,6 +500,8 @@ pub fn parse_device_events(
     ty: &Sender<DeviceEvent>,
     display: Display,
     button_scheme: ButtonScheme,
+    ignored_buttoncodes: Vec<ButtonCode>,
+    ignored_buttoncodes_rx: Receiver<Vec<ButtonCode>>,
 ) {
     let mut current_slot: i32 = 0; // Basically for which finger id to events are meant
     const PEN_SLOT: i32 = 100; // Figer id for wacom pen
@@ -519,8 +524,13 @@ pub fn parse_device_events(
     }*/
 
     let mut button_scheme = button_scheme;
+    let mut ignored_buttoncodes = ignored_buttoncodes;
 
     while let Ok(evt) = rx.recv() {
+        while let Ok(new_ignored_buttoncodes) = ignored_buttoncodes_rx.try_recv() {
+            ignored_buttoncodes = new_ignored_buttoncodes;
+        }
+
         if evt.kind == EV_ABS {
             if evt.code == ecodes::ABS_X {
                 // (wacom)
@@ -647,12 +657,15 @@ pub fn parse_device_events(
                 }
             } else if evt.code != BTN_TOUCH {
                 if let Some(button_status) = ButtonStatus::try_from_raw(evt.value) {
-                    ty.send(DeviceEvent::Button {
-                        time: seconds(evt.time),
-                        code: ButtonCode::from_raw(evt.code, rotation, button_scheme),
-                        status: button_status,
-                    })
-                    .unwrap();
+                    let code = ButtonCode::from_raw(evt.code, rotation, button_scheme);
+                    if ! ignored_buttoncodes.contains(&code) {
+                        ty.send(DeviceEvent::Button {
+                            time: seconds(evt.time),
+                            code,
+                            status: button_status,
+                        })
+                        .unwrap();
+                    }
                 }
             }
         } else if evt.kind == EV_MSC && evt.code == MSC_RAW {

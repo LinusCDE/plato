@@ -376,8 +376,9 @@ pub fn run() -> Result<(), Error> {
             }).unwrap();
         }
     }
+    let (ignored_bc_tx, ignored_bc_rx) = std::sync::mpsc::channel::<Vec<ButtonCode>>();
     let (raw_sender, raw_receiver) = raw_events(paths, filter_input_cmd_receiver);
-    let touch_screen = gesture_events(device_events(raw_receiver, context.display, context.settings.button_scheme));
+    let touch_screen = gesture_events(device_events(raw_receiver, context.display, context.settings.button_scheme, context.settings.remarkable.ignored_buttons.clone(), ignored_bc_rx));
     let usb_port = usb_events();
 
     let (tx, rx) = mpsc::channel();
@@ -1047,6 +1048,17 @@ pub fn run() -> Result<(), Error> {
                     }).unwrap();
                 }
 
+                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
+            },
+            Event::Select(EntryId::ToggleIgnoreButtonCode(code)) => {
+                let ignored_buttons = &mut context.settings.remarkable.ignored_buttons;
+                if ignored_buttons.contains(&code) {
+                    let code_index = ignored_buttons.iter().position(|&e| e == code).unwrap();
+                    ignored_buttons.remove(code_index);
+                }else {
+                    ignored_buttons.push(code);
+                }
+                ignored_bc_tx.send(ignored_buttons.clone()).unwrap();
                 rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
             },
             Event::Select(EntryId::ToggleIntermissionImage(ref kind, ref path)) => {

@@ -12,6 +12,7 @@ use crate::color::BLACK;
 use crate::device::CURRENT_DEVICE;
 use crate::unit::mm_to_px;
 use crate::app::{EVENT_TOUCH_SCREEN, EVENT_WACOM};
+use crate::input::ButtonCode;
 
 pub use self::preset::{LightPreset, guess_frontlight};
 
@@ -104,13 +105,16 @@ impl fmt::Display for InputSource {
 pub struct RemarkableSettings {
     pub refresh_quality: RefreshQuality,
     pub input_sources: Vec<InputSource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored_buttons: Vec<ButtonCode>,
 }
 
 impl Default for RemarkableSettings {
     fn default() -> Self {
         RemarkableSettings {
             refresh_quality: RefreshQuality::default(),
-            input_sources: vec![InputSource::Touch, InputSource::Pen]
+            input_sources: vec![InputSource::Touch, InputSource::Pen],
+            ignored_buttons: vec![],
         }
     }
 }

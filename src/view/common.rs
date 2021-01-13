@@ -2,6 +2,7 @@ use std::env;
 use std::sync::mpsc;
 use chrono::Local;
 use crate::device::CURRENT_DEVICE;
+use crate::input::ButtonCode;
 use crate::settings::{ButtonScheme, RotationLock, InputSource};
 use crate::framebuffer::UpdateMode;
 use crate::geom::{Point, Rectangle};
@@ -123,6 +124,19 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                       context.settings.remarkable.input_sources.contains(&InputSource::Pen)),
                               ];
 
+        let mut ignore_button_codes = vec![];
+        let button_codes = match CURRENT_LIBREMARKABLE_DEVICE.model {
+            Model::Gen1 => vec![ButtonCode::Backward, ButtonCode::Home, ButtonCode::Forward, ButtonCode::Power],
+            Model::Gen2 => vec![ButtonCode::Power],
+            _ => unreachable!()
+        };
+        for button_code in button_codes {
+            ignore_button_codes.push(EntryKind::CheckBox(format!("{:?}", button_code).to_string(),
+                                         EntryId::ToggleIgnoreButtonCode(button_code),
+                                         context.settings.remarkable.ignored_buttons.contains(&button_code)));
+        }
+
+
         let mut entries = vec![/*EntryKind::CheckBox("Invert Colors".to_string(),
                                                    EntryId::ToggleInverted,
                                                    context.fb.inverted()),
@@ -131,8 +145,10 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                                    context.fb.monochrome()),*/
                                EntryKind::SubMenu("Refresh Quality".to_string(),
                                                    refresh_qualities),
-                               EntryKind::SubMenu("Input by".to_string(),
+                               EntryKind::SubMenu("Input Sources".to_string(),
                                                    input_sources),
+                               EntryKind::SubMenu("Ignored Buttons".to_string(),
+                                                   ignore_button_codes),
                                /*EntryKind::CheckBox("Enable WiFi".to_string(),
                                                    EntryId::ToggleWifi,
                                                    context.settings.wifi),*/

@@ -277,7 +277,7 @@ impl Device {
             Model::Glo |
             Model::TouchC => 4,
             Model::TouchAB => 3,
-            Model::Remarkable => 3, // Shouldn't matter
+            Model::Remarkable => 1, // Shouldn't matter
         }
     }
 

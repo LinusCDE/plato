@@ -554,6 +554,7 @@ pub enum EntryId {
     RefreshQuality(RefreshQuality),
     ToggleInputSource(InputSource),
     ToggleIgnoreButtonCode(ButtonCode),
+    ToggleDithered,
     ToggleWifi,
     Rotate(i8),
     Launch(AppCmd),

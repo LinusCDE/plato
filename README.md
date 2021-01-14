@@ -7,10 +7,10 @@
 
 *Plato* is a document reader for *Kobo*'s e-readers.
 
-**This is a fork for the reMarkable (gen 1) device.**
+**This is a fork for the reMarkable.**
 
 Also see [darvin](https://github.com/darvin)'s [work](https://github.com/darvin/plato) of
-porting plato to the reMarkable 2 years ago. ( I Read nice mangas with his port. :) )
+porting plato to the reMarkable 2 years ago. ( I read nice mangas with his port. :) )
 
 ## Install on reMarkable
 

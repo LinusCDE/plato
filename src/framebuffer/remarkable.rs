@@ -18,10 +18,14 @@ use mmap::MemoryMap;
 use std::os::unix::io::AsRawFd;
 use std::fs;
 
+type ColorTransform = fn(u32, u32, u8) -> u8; // Copied from ./kobo.rs
+
 pub struct RemarkableFramebuffer {
     fb: libremarkable::framebuffer::core::Framebuffer<'static>,
     monochrome: bool, // Currently stubbed
     inverted: bool, // Currently stubbed
+    transform: ColorTransform,
+    dithered: bool,
     refresh_quality: RefreshQuality,
 }
 
@@ -31,6 +35,8 @@ impl RemarkableFramebuffer {
             fb: libremarkable::framebuffer::core::Framebuffer::from_path(fb_device_path),
             monochrome: false,
             inverted: false,
+            dithered: false,
+            transform: transform_identity,
             refresh_quality: Default::default()
         })
     }
@@ -117,7 +123,14 @@ impl Framebuffer for RemarkableFramebuffer {
             width: rect.max.x as u32 - rect.min.x as u32,
             height: rect.max.y as u32 - rect.min.y as u32,
         };
-        
+
+        let overwrite_dither = if self.dithered {
+            Some(common::dither_mode::EPDC_FLAG_USE_DITHERING_Y1)
+        } else {
+            None
+        };
+
+
         // Note: I took some of the comments from libremarkable
         // regarding those settings and rephrased them here for
         // easier lookup. Please also look up the original comments
@@ -130,7 +143,7 @@ impl Framebuffer for RemarkableFramebuffer {
                     PartialRefreshMode::Async,
                     common::waveform_mode::WAVEFORM_MODE_DU,
                     common::display_temp::TEMP_USE_REMARKABLE_DRAW, // Low latency (see comments on this)
-                    common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH,
+                    overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH),
                     common::DRAWING_QUANT_BIT,
                     false,
                 ))
@@ -142,7 +155,7 @@ impl Framebuffer for RemarkableFramebuffer {
                     PartialRefreshMode::Async,
                     common::waveform_mode::WAVEFORM_MODE_GLR16,
                     common::display_temp::TEMP_USE_AMBIENT,
-                    common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH,
+                    overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH),
                     common::DRAWING_QUANT_BIT,
                     false,
                 ))
@@ -154,7 +167,7 @@ impl Framebuffer for RemarkableFramebuffer {
                     PartialRefreshMode::Async,
                     common::waveform_mode::WAVEFORM_MODE_GC16_FAST, // Also used by reMarkable for UI (anymore??)
                     common::display_temp::TEMP_USE_AMBIENT,
-                    common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH,
+                    overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH),
                     common::DRAWING_QUANT_BIT,
                     false,
                 ))
@@ -170,7 +183,7 @@ impl Framebuffer for RemarkableFramebuffer {
                             PartialRefreshMode::Async,
                             common::waveform_mode::WAVEFORM_MODE_GC16_FAST, // Ui setting
                             common::display_temp::TEMP_USE_REMARKABLE_DRAW, // Low latency
-                            common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH, 
+                            overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH),
                             common::DRAWING_QUANT_BIT,
                             false,
                         ))
@@ -182,7 +195,7 @@ impl Framebuffer for RemarkableFramebuffer {
                             PartialRefreshMode::Async,
                             common::waveform_mode::WAVEFORM_MODE_AUTO,
                             common::display_temp::TEMP_USE_AMBIENT,
-                            common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER,
+                            overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER),
                             common::DRAWING_QUANT_BIT,
                             false,
                         ))
@@ -194,7 +207,7 @@ impl Framebuffer for RemarkableFramebuffer {
                             PartialRefreshMode::Async,
                             common::waveform_mode::WAVEFORM_MODE_GC16,
                             common::display_temp::TEMP_USE_AMBIENT,
-                            common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER,
+                            overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER),
                             common::DRAWING_QUANT_BIT,
                             true, // <-- Force full refresh
                         ))
@@ -206,7 +219,7 @@ impl Framebuffer for RemarkableFramebuffer {
                             PartialRefreshMode::Async,
                             common::waveform_mode::WAVEFORM_MODE_GC16,
                             common::display_temp::TEMP_USE_MAX,
-                            common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH,
+                            overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_DITHERING_PASSTHROUGH),
                             common::DRAWING_QUANT_BIT,
                             true, // <-- Force full refresh
                         ))
@@ -218,7 +231,7 @@ impl Framebuffer for RemarkableFramebuffer {
                 Ok(self.fb.full_refresh(
                     common::waveform_mode::WAVEFORM_MODE_GC16, // Flashes black white in full mode
                     common::display_temp::TEMP_USE_AMBIENT, // Not such low latency (see comments on this)
-                    common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER, // Good or bad here???
+                    overwrite_dither.unwrap_or(common::dither_mode::EPDC_FLAG_USE_REMARKABLE_DITHER), // Good or bad here???
                     common::DRAWING_QUANT_BIT,
                     false, // Don't wait for completion (token should allow the device to do anyway if actually wanted)
                 ))
@@ -255,7 +268,7 @@ impl Framebuffer for RemarkableFramebuffer {
                 libremarkable::image::ColorType::RGB(8),
             )
             .unwrap();
-        
+
         let png = writer.into_inner().unwrap();
         fs::write(path, &*png)?;
         Ok(())        
@@ -317,6 +330,26 @@ impl Framebuffer for RemarkableFramebuffer {
         self.monochrome
     }
 
+    fn set_dithered(&mut self, enable: bool) {
+        if enable == self.dithered {
+            return;
+        }
+
+        self.dithered = enable;
+
+        if CURRENT_DEVICE.mark() < 7 {
+            if enable {
+                self.transform = transform_dither_g16;
+            } else {
+                self.transform = transform_identity;
+            }
+        }
+    }
+
+    fn dithered(&self) -> bool {
+        self.dithered
+    }
+
     fn width(&self) -> u32 {
         self.fb.var_screen_info.xres
     }
@@ -324,6 +357,31 @@ impl Framebuffer for RemarkableFramebuffer {
     fn height(&self) -> u32 {
         self.fb.var_screen_info.yres
     }
+
+}
+
+const DITHER_PITCH: u32 = 128; // Copied from ./kobo.rs
+
+// The input color is in {0 .. 255}.
+// The output color is in G16.
+// G16 := {17 * i | i ∈ {0 .. 15}}.
+fn transform_dither_g16(x: u32, y: u32, color: u8) -> u8 {
+    // Get the address of the drift value.
+    let addr = (x % DITHER_PITCH) + (y % DITHER_PITCH) * DITHER_PITCH;
+    // Apply the drift to the input color.
+    let c = (color as i16 + super::kobo::DITHER_G16_DRIFTS[addr as usize] as i16).max(0).min(255);
+    // Compute the distance to the previous color in G16.
+    let d = c % 17;
+    // Return the nearest color in G16.
+    if d < 9 {
+        (c - d) as u8
+    } else {
+        (c + (17 - d)) as u8
+    }
+}
+
+fn transform_identity(_x: u32, _y: u32, color: u8) -> u8 {
+    color
 }
 
 impl Drop for RemarkableFramebuffer {

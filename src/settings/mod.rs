@@ -133,9 +133,9 @@ pub struct Settings {
     pub button_scheme: ButtonScheme,
     pub auto_suspend: u8,
     pub auto_power_off: u8,
-    pub remarkable: RemarkableSettings,
     pub time_format: String,
     pub date_format: String,
+    pub remarkable: RemarkableSettings,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<LibrarySettings>,
     #[serde(skip_serializing_if = "FxHashMap::is_empty")]

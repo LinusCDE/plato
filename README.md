@@ -34,8 +34,8 @@ After that, you can build the software using build.sh and create the same direct
 Or just look at the file `make_remarkable.sh` which checks the above condition and runs a full clean build for you.
 Documentation: [GUIDE](doc/GUIDE.md), [MANUAL](doc/MANUAL.md) and [BUILD](doc/BUILD.md).
 
-<img width="45%" src="https://transfer.cosmos-ink.net/OyWia/screen1.jpg"> &nbsp; <img width="45%" src="https://transfer.cosmos-ink.net/qruLv/screen2.jpg">
-<img width="45%" src="https://transfer.cosmos-ink.net/vaCwx/screen3.jpg">
+<img width="45%" src="https://transfer.cosmos-ink.net/4fvGf/screen1.jpg"> &nbsp; <img width="45%" src="https://transfer.cosmos-ink.net/skyR8/screen2.jpg">
+<img width="45%" src="https://transfer.cosmos-ink.net/Ma5a9/screen3.jpg">
 
 ## reMarkable 2 support
 

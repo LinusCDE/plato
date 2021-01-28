@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 WORKDIR=$(dirname "`realpath \"$0\"`")
 cd "$WORKDIR" || exit 1

@@ -1,11 +1,16 @@
 use std::io;
 use std::char;
+use std::fmt;
+use std::str::FromStr;
 use std::borrow::Cow;
 use std::time::SystemTime;
+use std::num::ParseIntError;
 use std::fs::{self, File, Metadata};
 use std::path::{Path, PathBuf, Component};
 use fxhash::FxHashMap;
-use serde::{Serialize, Deserialize};
+use std::ops::{Deref, DerefMut};
+use serde::{Serialize, Serializer, Deserialize, Deserializer};
+use serde::de::{self, Visitor};
 use lazy_static::lazy_static;
 use entities::ENTITIES;
 use walkdir::DirEntry;
@@ -63,44 +68,112 @@ pub fn decode_entities(text: &str) -> Cow<str> {
 
 pub fn load_json<T, P: AsRef<Path>>(path: P) -> Result<T, Error> where for<'a> T: Deserialize<'a> {
     let file = File::open(path.as_ref())
-                    .with_context(|| format!("Cannot open file {}.", path.as_ref().display()))?;
+                    .with_context(|| format!("can't open file {}", path.as_ref().display()))?;
     serde_json::from_reader(file)
-               .with_context(|| format!("Cannot parse JSON from {}.", path.as_ref().display()))
+               .with_context(|| format!("can't parse JSON from {}", path.as_ref().display()))
                .map_err(Into::into)
 }
 
 pub fn save_json<T, P: AsRef<Path>>(data: &T, path: P) -> Result<(), Error> where T: Serialize {
     let file = File::create(path.as_ref())
-                    .with_context(|| format!("Cannot create file {}.", path.as_ref().display()))?;
+                    .with_context(|| format!("can't create file {}", path.as_ref().display()))?;
     serde_json::to_writer_pretty(file, data)
-               .with_context(|| format!("Cannot serialize to JSON file {}.", path.as_ref().display()))
+               .with_context(|| format!("can't serialize to JSON file {}", path.as_ref().display()))
                .map_err(Into::into)
 }
 
 pub fn load_toml<T, P: AsRef<Path>>(path: P) -> Result<T, Error> where for<'a> T: Deserialize<'a> {
     let s = fs::read_to_string(path.as_ref())
-               .with_context(|| format!("Cannot read file {}.", path.as_ref().display()))?;
+               .with_context(|| format!("can't read file {}", path.as_ref().display()))?;
     toml::from_str(&s)
-         .with_context(|| format!("Cannot parse TOML content from {}.", path.as_ref().display()))
+         .with_context(|| format!("can't parse TOML content from {}", path.as_ref().display()))
          .map_err(Into::into)
 }
 
 pub fn save_toml<T, P: AsRef<Path>>(data: &T, path: P) -> Result<(), Error> where T: Serialize {
-    let s = toml::to_string(data).context("Cannot convert to TOML format.")?;
+    let s = toml::to_string(data)
+                 .context("can't convert to TOML format")?;
     fs::write(path.as_ref(), &s)
-       .with_context(|| format!("Cannot write to file {}.", path.as_ref().display()))
+       .with_context(|| format!("can't write to file {}", path.as_ref().display()))
        .map_err(Into::into)
 }
 
 pub trait Fingerprint {
-    fn fingerprint(&self, epoch: SystemTime) -> io::Result<u64>;
+    fn fingerprint(&self, epoch: SystemTime) -> io::Result<Fp>;
 }
 
 impl Fingerprint for Metadata {
-    fn fingerprint(&self, epoch: SystemTime) -> io::Result<u64> {
+    fn fingerprint(&self, epoch: SystemTime) -> io::Result<Fp> {
         let m = self.modified()?.duration_since(epoch)
                     .map_or_else(|e| e.duration().as_secs(), |v| v.as_secs());
-        Ok(m.rotate_left(32) ^ self.len())
+        Ok(Fp(m.rotate_left(32) ^ self.len()))
+    }
+}
+
+#[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
+pub struct Fp(u64);
+
+impl Deref for Fp {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Fp {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl FromStr for Fp {
+    type Err = ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        u64::from_str_radix(s, 16).map(Fp)
+    }
+}
+
+impl fmt::Display for Fp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016X}", self.0)
+    }
+}
+
+impl Serialize for Fp {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+struct FpVisitor;
+
+impl<'de> Visitor<'de> for FpVisitor {
+    type Value = Fp;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a string")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Self::Value::from_str(value)
+             .map_err(|e| E::custom(format!("can't parse fingerprint: {}", e)))
+    }
+}
+
+impl<'de> Deserialize<'de> for Fp {
+    fn deserialize<D>(deserializer: D) -> Result<Fp, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(FpVisitor)
     }
 }
 
@@ -110,7 +183,7 @@ pub trait Normalize: ToOwned {
 
 impl Normalize for Path {
     fn normalize(&self) -> PathBuf {
-        let mut result = PathBuf::from("");
+        let mut result = PathBuf::default();
 
         for c in self.components() {
             match c {

@@ -190,7 +190,7 @@ impl Sketch {
             allowed_kinds: ["png".to_string()].iter().cloned().collect(),
             .. Default::default()
         };
-        context.library.import(&self.save_path, &import_settings);
+        context.library.import(&import_settings);
     }
 }
 
@@ -202,7 +202,7 @@ fn draw_segment(pixmap: &mut Pixmap, ts: &mut TouchState, position: Point, time:
                           (position.y - ts.pt.y) as f32).length();
             let speed = d / (time - ts.time) as f32;
             let base_radius = pen.size as f32 / 2.0;
-            let radius = base_radius + (1.0 + base_radius.sqrt()) * speed.max(pen.min_speed).min(pen.max_speed) / (pen.max_speed - pen.min_speed);
+            let radius = base_radius + (1.0 + base_radius.sqrt()) * speed.clamp(pen.min_speed, pen.max_speed) / (pen.max_speed - pen.min_speed);
             (ts.radius, radius)
         } else {
             (ts.radius, ts.radius)
@@ -267,7 +267,7 @@ impl View for Sketch {
             Event::Select(EntryId::Load(ref name)) => {
                 if let Err(e) = self.load(name) {
                     let msg = format!("Couldn't load sketch: {}).", e);
-                    let notif = Notification::new(ViewId::LoadSketchNotif, msg, hub, rq, context);
+                    let notif = Notification::new(msg, hub, rq, context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
                 } else {
                     rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
@@ -296,8 +296,7 @@ impl View for Sketch {
                     },
                 };
                 if let Some(msg) = msg.take() {
-                    let notif = Notification::new(ViewId::SaveSketchNotif,
-                                                  msg, hub, rq, context);
+                    let notif = Notification::new(msg, hub, rq, context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
                 }
                 true

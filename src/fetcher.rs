@@ -91,11 +91,11 @@ fn update_token(client: &Client, session: &mut Session, settings: &Settings) -> 
             data: body.get("access_token")
                       .and_then(|v| v.as_str())
                       .map(String::from)
-                      .ok_or_else(|| format_err!("Missing access token."))?,
+                      .ok_or_else(|| format_err!("missing access token"))?,
             valid_until: body.get("expires_in")
                              .and_then(|v| v.as_i64())
                              .map(|d| Utc::now() + Duration::seconds(d))
-                             .ok_or_else(|| format_err!("Missing expires in."))?,
+                             .ok_or_else(|| format_err!("missing expires in"))?,
         };
         Ok(())
     } else {
@@ -103,7 +103,7 @@ fn update_token(client: &Client, session: &mut Session, settings: &Settings) -> 
                            .and_then(JsonValue::as_str)
                            .or_else(|| status.canonical_reason())
                            .unwrap_or_else(|| status.as_str());
-        Err(format_err!("Failed to authentificate: {}.", err_desc))
+        Err(format_err!("failed to authentificate: {}", err_desc))
     }
 }
 
@@ -117,16 +117,18 @@ fn is_detail_available(client: &Client, settings: &Settings) -> bool {
 
 fn main() -> Result<(), Error> {
     let mut args = env::args().skip(1);
+    let library_path = PathBuf::from(args.next()
+                                         .ok_or_else(|| format_err!("missing argument: library path"))?);
     let save_path = PathBuf::from(args.next()
-                                      .ok_or_else(|| format_err!("Missing argument: save path."))?);
+                                      .ok_or_else(|| format_err!("missing argument: save path"))?);
     let wifi = args.next()
-                   .ok_or_else(|| format_err!("Missing argument: wifi status."))
+                   .ok_or_else(|| format_err!("missing argument: wifi status"))
                    .and_then(|v| v.parse::<bool>().map_err(Into::into))?;
     let online = args.next()
-                     .ok_or_else(|| format_err!("Missing argument: online status."))
+                     .ok_or_else(|| format_err!("missing argument: online status"))
                      .and_then(|v| v.parse::<bool>().map_err(Into::into))?;
     let settings = load_toml::<Settings, _>(SETTINGS_PATH)
-                             .with_context(|| format!("Can't load settings from {}", SETTINGS_PATH))?;
+                             .with_context(|| format!("can't load settings from {}", SETTINGS_PATH))?;
     let mut session = load_json::<Session, _>(SESSION_PATH)
                                 .unwrap_or_default();
 
@@ -182,10 +184,6 @@ fn main() -> Result<(), Error> {
         let mut archivals_count = 0;
 
         if let Ok(event) = serde_json::from_str::<JsonValue>(&line) {
-            let library_path = event.get("path")
-                                    .and_then(JsonValue::as_str)
-                                    .map(PathBuf::from)
-                                    .unwrap_or_else(|| save_path.clone());
             if let Some(results) = event.get("results").and_then(JsonValue::as_array) {
                 let message = if results.is_empty() {
                     "No finished articles.".to_string()
@@ -230,13 +228,14 @@ fn main() -> Result<(), Error> {
                     }
 
                     if settings.remove_finished {
-                        if let Some(relat) = entry.pointer("/file/path")
-                                                  .and_then(JsonValue::as_str) {
-                            let path = library_path.join(relat);
-                            match fs::remove_file(&path) {
-                                Ok(()) => session.removals_count = session.removals_count.wrapping_add(1),
-                                Err(e) => eprintln!("Can't remove {}: {}", path.display(), e),
-                            }
+                        if let Some(path) = entry.pointer("/file/path")
+                                                 .and_then(JsonValue::as_str) {
+                            let event = json!({
+                                "type": "removeDocument",
+                                "path": path,
+                            });
+                            println!("{}", event);
+                            session.removals_count = session.removals_count.wrapping_add(1)
                         }
                     }
 
@@ -272,10 +271,6 @@ fn main() -> Result<(), Error> {
                             "message": &message,
                         });
                         println!("{}", event);
-                        if removals_count > 0 {
-                            let event = json!({"type": "cleanUp"});
-                            println!("{}", event);
-                        }
                     }
                 }
             }
@@ -343,7 +338,7 @@ fn main() -> Result<(), Error> {
 
                 let id = element.get("id")
                                 .and_then(JsonValue::as_u64)
-                                .ok_or_else(|| format_err!("Missing id."))?;
+                                .ok_or_else(|| format_err!("missing id"))?;
 
                 let title = element.get("title")
                                    .and_then(JsonValue::as_str)
@@ -381,7 +376,7 @@ fn main() -> Result<(), Error> {
                 let updated_at = element.get("updated_at")
                                         .and_then(JsonValue::as_str)
                                         .and_then(|v| DateTime::parse_from_str(v, DATE_FORMAT).ok())
-                                        .ok_or_else(|| format_err!("Missing updated at."))?;
+                                        .ok_or_else(|| format_err!("missing updated at"))?;
 
                 session.since = updated_at.timestamp();
 
@@ -400,37 +395,39 @@ fn main() -> Result<(), Error> {
                                      .and_then(|mut body| body.copy_to(&mut file));
 
                 if let Err(err) = response {
-                    eprintln!("{}", err);
+                    eprintln!("Can't download {}: {:#}.", id, err);
                     fs::remove_file(epub_path).ok();
                     continue;
                 }
 
                 session.downloads_count = session.downloads_count.wrapping_add(1);
 
-                let file_info = json!({
-                    "path": epub_path.to_str().unwrap_or(""),
-                    "kind": "epub",
-                    "size": file.metadata().ok()
-                                .map_or(0, |m| m.len()),
-                });
+                if let Ok(path) = epub_path.strip_prefix(&library_path) {
+                    let file_info = json!({
+                        "path": path,
+                        "kind": "epub",
+                        "size": file.metadata().ok()
+                                    .map_or(0, |m| m.len()),
+                    });
 
-                let info = json!({
-                    "title": title,
-                    "author": author,
-                    "year": year,
-                    "identifier": id.to_string(),
-                    "added": updated_at.with_timezone(&Local)
-                                       .format("%Y-%m-%d %H:%M:%S")
-                                       .to_string(),
-                    "file": file_info,
-                });
+                    let info = json!({
+                        "title": title,
+                        "author": author,
+                        "year": year,
+                        "identifier": id.to_string(),
+                        "added": updated_at.with_timezone(&Local)
+                                           .format("%Y-%m-%d %H:%M:%S")
+                                           .to_string(),
+                        "file": file_info,
+                    });
 
-                let event = json!({
-                    "type": "addDocument",
-                    "info": &info,
-                });
+                    let event = json!({
+                        "type": "addDocument",
+                        "info": &info,
+                    });
 
-                println!("{}", event);
+                    println!("{}", event);
+                }
             }
         }
 
@@ -466,6 +463,6 @@ fn main() -> Result<(), Error> {
         println!("{}", event);
     }
 
-    save_json(&session, SESSION_PATH).context("Can't save session.")?;
+    save_json(&session, SESSION_PATH).context("can't save session")?;
     Ok(())
 }

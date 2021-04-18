@@ -192,7 +192,7 @@ pub fn render(view: &dyn View, wait: bool, ids: &FxHashMap<Id, Vec<Rectangle>>, 
             if wait {
                 updating.retain(|tok, urect| {
                     !render_rect.overlaps(urect) ||
-                     fb.wait(*tok).map_err(|err| eprintln!("{}", err)).is_err()
+                     fb.wait(*tok).map_err(|err| eprintln!("Can't wait: {:#}.", err)).is_err()
                 });
             }
 
@@ -252,7 +252,7 @@ pub fn process_render_queue(view: &dyn View, rq: &mut RenderQueue, context: &mut
 
         for (id, rect) in pairs.into_iter().rev() {
             if let Some(id) = id {
-                ids.entry(id).or_insert_with(|| Vec::new()).push(rect);
+                ids.entry(id).or_insert_with(Vec::new).push(rect);
             } else {
                 bgs.push(rect);
             }
@@ -264,7 +264,7 @@ pub fn process_render_queue(view: &dyn View, rq: &mut RenderQueue, context: &mut
         for rect in rects {
             match context.fb.update(&rect, mode) {
                 Ok(tok) => { updating.insert(tok, rect); },
-                Err(err) => { eprintln!("{}", err); },
+                Err(err) => { eprintln!("Can't update {}: {:#}.", rect, err); },
             }
         }
     }
@@ -290,7 +290,6 @@ pub enum Event {
     ResultsGoTo(usize),
     CropMargins(Box<Margin>),
     Chapter(CycleDir),
-    Sort(SortMethod),
     SelectDirectory(PathBuf),
     ToggleSelectDirectory(PathBuf),
     NavigationBarResized(i32),
@@ -314,9 +313,8 @@ pub enum Event {
     CloseSub(ViewId),
     Search(String),
     SearchResult(usize, Vec<Boundary>),
-    FetcherCleanUp(u32),
-    FetcherImport(u32),
     FetcherAddDocument(u32, Box<Info>),
+    FetcherRemoveDocument(u32, PathBuf),
     FetcherSearch {
         id: u32,
         path: Option<PathBuf>,
@@ -415,16 +413,7 @@ pub enum ViewId {
     MarginCropper,
     TopBottomBars,
     TableOfContents,
-    MessageNotif,
-    BoundaryNotif,
-    TakeScreenshotNotif,
-    SaveDocumentNotif,
-    SaveSketchNotif,
-    LoadSketchNotif,
-    NoSearchResultsNotif,
-    InvalidSearchQueryNotif,
-    LowBatteryNotif,
-    NetUpNotif,
+    MessageNotif(Id),
     SubMenu(u8),
 }
 
@@ -490,6 +479,7 @@ pub enum EntryKind {
     CheckBox(String, EntryId, bool),
     RadioButton(String, EntryId, bool),
     SubMenu(String, Vec<EntryKind>),
+    More(Vec<EntryKind>),
     Separator,
 }
 
@@ -505,6 +495,7 @@ pub enum EntryId {
     CleanUp,
     Sort(SortMethod),
     ReverseOrder,
+    EmptyTrash,
     Remove(PathBuf),
     MoveTo(PathBuf, usize),
     AddDirectory(PathBuf),
@@ -574,10 +565,7 @@ pub enum EntryId {
 
 impl EntryKind {
     pub fn is_separator(&self) -> bool {
-        match *self {
-            EntryKind::Separator => true,
-            _ => false,
-        }
+        matches!(*self, EntryKind::Separator)
     }
 
     pub fn text(&self) -> &str {
@@ -587,6 +575,7 @@ impl EntryKind {
             EntryKind::CheckBox(ref s, ..) |
             EntryKind::RadioButton(ref s, ..) |
             EntryKind::SubMenu(ref s, ..) => s,
+            EntryKind::More(..) => "More",
             _ => "",
         }
     }
@@ -656,6 +645,12 @@ impl RenderQueue {
         self.entry((data.mode, data.wait)).or_insert_with(|| {
             Vec::new()
         }).push((data.id, data.rect));
+    }
+}
+
+impl Default for RenderQueue {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

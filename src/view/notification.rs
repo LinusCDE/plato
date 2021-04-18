@@ -25,8 +25,9 @@ pub struct Notification {
 }
 
 impl Notification {
-    pub fn new(view_id: ViewId, text: String, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) -> Notification {
+    pub fn new(text: String, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) -> Notification {
         let id = ID_FEEDER.next();
+        let view_id = ViewId::MessageNotif(id);
         let hub2 = hub.clone();
         let index = context.notification_index;
 
@@ -66,7 +67,7 @@ impl Notification {
         Notification {
             id,
             rect,
-            children: vec![],
+            children: Vec::new(),
             text,
             max_width: max_message_width,
             index,

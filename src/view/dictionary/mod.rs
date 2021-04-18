@@ -56,7 +56,7 @@ fn query_to_content(query: &str, language: &String, fuzzy: bool, target: Option<
         }
 
         if let Some(results) = dict.lookup(query, fuzzy)
-                                   .map_err(|e| eprintln!("{}", e))
+                                   .map_err(|e| eprintln!("Can't search dictionary: {:#}.", e))
                                    .ok().filter(|r| !r.is_empty()) {
 
             if target.is_none() {
@@ -151,7 +151,7 @@ impl Dictionary {
 
         let bottom_bar = BottomBar::new(rect![rect.min.x, rect.max.y - small_height + big_thickness,
                                               rect.max.x, rect.max.y],
-                                        target.as_ref().map(String::as_str).unwrap_or("All"), false, false);
+                                        target.as_deref().unwrap_or("All"), false, false);
         children.push(Box::new(bottom_bar) as Box<dyn View>);
 
         rq.add(RenderData::new(id, rect, UpdateMode::Gui));
@@ -453,7 +453,7 @@ impl View for Dictionary {
             Event::Select(EntryId::SetSearchTarget(ref target)) => {
                 if *target != self.target {
                     self.target = target.clone();
-                    let name = self.target.as_ref().map(String::as_str).unwrap_or("All");
+                    let name = self.target.as_deref().unwrap_or("All");
                     if let Some(bottom_bar) = self.children[6].downcast_mut::<BottomBar>() {
                         bottom_bar.update_name(name, rq);
                     }

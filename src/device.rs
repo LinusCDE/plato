@@ -6,6 +6,7 @@ use std::fmt::Display;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Model {
+    Nia,
     LibraH2O,
     Forma32GB,
     Forma,
@@ -37,6 +38,7 @@ pub enum Orientation {
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Model::Nia           => write!(f, "Nia"),
             Model::LibraH2O      => write!(f, "Libra H₂O"),
             Model::Forma32GB     => write!(f, "Forma 32GB"),
             Model::Forma         => write!(f, "Forma"),
@@ -164,6 +166,12 @@ impl Device {
                 dims: (1404, 1872),
                 dpi: 223,
             },
+            "luna" => Device {
+                model: Model::Nia,
+                proto: TouchProto::MultiB,
+                dims: (758, 1024),
+                dpi: 212,
+            },
             _ => Device {
                 model: if model_number == "320" { Model::TouchC } else { Model::TouchAB },
                 proto: TouchProto::MultiA,
@@ -189,48 +197,32 @@ impl Device {
     }
 
     pub fn has_natural_light(&self) -> bool {
-        match self.frontlight_kind() {
-            FrontlightKind::Standard => false,
-            _ => true,
-        }
+        self.frontlight_kind() != FrontlightKind::Standard
     }
 
     pub fn has_lightsensor(&self) -> bool {
-        match self.model {
-            Model::AuraONE |
-            Model::AuraONELimEd => true,
-            _ => false,
-        }
+        matches!(self.model,
+                 Model::AuraONE | Model::AuraONELimEd)
     }
 
     pub fn has_gyroscope(&self) -> bool {
-        match self.model {
-            Model::Forma | Model::Forma32GB | Model::LibraH2O => true,
-            _ => false,
-        }
+        matches!(self.model,
+                 Model::Forma | Model::Forma32GB | Model::LibraH2O)
     }
 
     pub fn has_page_turn_buttons(&self) -> bool {
-        match self.model {
-            Model::Forma | 
-            Model::Forma32GB | 
-            Model::LibraH2O |
-            Model::Remarkable => true,
-            _ => false,
+        if libremarkable::device::CURRENT_DEVICE.model == libremarkable::device::Model::Gen1 {
+            return true;
         }
+
+        matches!(self.model,
+                 Model::Forma | Model::Forma32GB | Model::LibraH2O)
     }
 
     pub fn has_removable_storage(&self) -> bool {
-        match self.model {
-            Model::AuraH2O |
-            Model::Aura |
-            Model::AuraHD |
-            Model::Mini |
-            Model::Glo |
-            Model::TouchAB |
-            Model::TouchC => true,
-            _ => false,
-        }
+        matches!(self.model,
+                 Model::AuraH2O | Model::Aura | Model::AuraHD |
+                 Model::Mini | Model::Glo | Model::TouchAB | Model::TouchC)
     }
 
     pub fn should_invert_buttons(&self, rotation: i8) -> bool {
@@ -258,6 +250,7 @@ impl Device {
     /// libremarkable instead).
     pub fn mark(&self) -> u8 {
         match self.model {
+            Model::Nia |
             Model::LibraH2O |
             Model::Forma32GB |
             Model::Forma |
@@ -370,169 +363,7 @@ lazy_static! {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-    use super::{Device, Model, FrontlightKind, Orientation};
-    use super::CURRENT_DEVICE;
-
-    #[test]
-    fn test_global_static_current_device() {
-        env::set_var("PRODUCT", "frost");
-        env::set_var("MODEL_NUMBER", "380");
-
-        assert_eq!(CURRENT_DEVICE.model, Model::Forma32GB);
-    }
-
-    #[test]
-    fn test_device_frontlight_kind() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.frontlight_kind(), FrontlightKind::Premixed);
-
-        let device = Device::new("snow", "378");
-        assert_eq!(device.frontlight_kind(), FrontlightKind::Natural);
-    }
-
-    #[test]
-    fn test_device_has_natural_light() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.has_natural_light(), true);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.has_natural_light(), false);
-    }
-
-    #[test]
-    fn test_device_has_light_sensor() {
-        let device = Device::new("daylight", "380");
-        assert_eq!(device.has_lightsensor(), true);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.has_lightsensor(), false);
-    }
-
-    #[test]
-    fn test_device_has_gyroscope() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.has_gyroscope(), true);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.has_gyroscope(), false);
-    }
-
-    #[test]
-    fn test_device_has_page_turn_buttons() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.has_page_turn_buttons(), true);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.has_page_turn_buttons(), false);
-    }
-
-    #[test]
-    fn test_device_should_invert_buttons() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.should_invert_buttons(0), false);
-        assert_eq!(device.should_invert_buttons(1), false);
-        assert_eq!(device.should_invert_buttons(2), true);
-        assert_eq!(device.should_invert_buttons(3), true);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.should_invert_buttons(0), false);
-        assert_eq!(device.should_invert_buttons(1), true);
-        assert_eq!(device.should_invert_buttons(2), true);
-        assert_eq!(device.should_invert_buttons(3), false);
-    }
-
-    #[test]
-    fn test_device_orientation() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.orientation(0), Orientation::Landscape);
-        assert_eq!(device.orientation(1), Orientation::Portrait);
-
-        let device = Device::new("storm", "378");
-        assert_eq!(device.orientation(0), Orientation::Portrait);
-        assert_eq!(device.orientation(1), Orientation::Landscape);
-    }
-
-    #[test]
-    fn test_device_mark() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.mark(), 7);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.mark(), 6);
-    }
-
-    #[test]
-    fn test_device_mirroring_scheme() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.mirroring_scheme(), (2, -1));
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.mirroring_scheme(), (2, 1));
-    }
-
-    #[test]
-    fn test_device_should_mirror_axes() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.should_mirror_axes(0), (false, false));
-        assert_eq!(device.should_mirror_axes(1), (true, false));
-        assert_eq!(device.should_mirror_axes(2), (true, true));
-        assert_eq!(device.should_mirror_axes(3), (false, true));
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.should_mirror_axes(0), (false, false));
-        assert_eq!(device.should_mirror_axes(1), (false, true));
-        assert_eq!(device.should_mirror_axes(2), (true, true));
-        assert_eq!(device.should_mirror_axes(3), (true, false));
-    }
-
-    #[test]
-    fn test_device_swapping_scheme() {
-        let device = Device::new("storm", "378");
-        assert_eq!(device.swapping_scheme(), 0);
-
-        let device = Device::new("frost", "380");
-        assert_eq!(device.swapping_scheme(), 1);
-    }
-
-    #[test]
-    fn test_device_should_swap_axes() {
-        let device = Device::new("storm", "378");
-        assert_eq!(device.should_swap_axes(0), true);
-        assert_eq!(device.should_swap_axes(1), false);
-        assert_eq!(device.should_swap_axes(2), true);
-        assert_eq!(device.should_swap_axes(3), false);
-
-        let device = Device::new("frost", "380");
-        assert_eq!(device.should_swap_axes(0), false);
-        assert_eq!(device.should_swap_axes(1), true);
-        assert_eq!(device.should_swap_axes(2), false);
-        assert_eq!(device.should_swap_axes(3), true);
-    }
-
-    #[test]
-    fn test_device_startup_rotation() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.startup_rotation(), 1);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.startup_rotation(), 3);
-    }
-
-    #[test]
-    fn test_device_transformed_rotation() {
-        let device = Device::new("frost", "380");
-        assert_eq!(device.transformed_rotation(0), 0);
-        assert_eq!(device.transformed_rotation(1), 3);
-        assert_eq!(device.transformed_rotation(2), 2);
-        assert_eq!(device.transformed_rotation(3), 1);
-
-        let device = Device::new("pika", "378");
-        assert_eq!(device.transformed_rotation(0), 0);
-        assert_eq!(device.transformed_rotation(1), 1);
-        assert_eq!(device.transformed_rotation(2), 2);
-        assert_eq!(device.transformed_rotation(3), 3);
-    }
+    use super::Device;
 
     #[test]
     fn test_device_canonical_rotation() {

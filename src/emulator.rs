@@ -169,13 +169,13 @@ impl Framebuffer for WindowCanvas {
 
     fn save(&self, path: &str) -> Result<(), Error> {
         let (width, height) = self.dims();
-        let file = File::create(path).with_context(|| format!("Can't create output file {}.", path))?;
+        let file = File::create(path).with_context(|| format!("can't create output file {}", path))?;
         let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_depth(png::BitDepth::Eight);
         encoder.set_color(png::ColorType::RGB);
-        let mut writer = encoder.write_header().with_context(|| format!("Can't write PNG header for {}.", path))?;
+        let mut writer = encoder.write_header().with_context(|| format!("can't write PNG header for {}", path))?;
         let data = self.read_pixels(self.viewport(), PixelFormatEnum::RGB24).unwrap_or_default();
-        writer.write_image_data(&data).with_context(|| format!("Can't write PNG data to {}.", path))?;
+        writer.write_image_data(&data).with_context(|| format!("can't write PNG data to {}", path))?;
         Ok(())
     }
 
@@ -495,21 +495,18 @@ fn main() -> Result<(), Error> {
                         Err(e) => format!("Couldn't take screenshot: {}).", e),
                         Ok(_) => format!("Saved {}.", name),
                     };
-                    let notif = Notification::new(ViewId::TakeScreenshotNotif,
-                                                  msg, &tx, &mut rq, &mut context);
+                    let notif = Notification::new(msg, &tx, &mut rq, &mut context);
                     view.children_mut().push(Box::new(notif) as Box<dyn View>);
                 },
                 Event::Notify(msg) => {
-                    let notif = Notification::new(ViewId::MessageNotif,
-                                                  msg, &tx, &mut rq, &mut context);
+                    let notif = Notification::new(msg, &tx, &mut rq, &mut context);
                     view.children_mut().push(Box::new(notif) as Box<dyn View>);
                 },
                 Event::Device(DeviceEvent::NetUp) |
                 Event::CheckFetcher(..) |
                 Event::FetcherAddDocument(..) |
-                Event::FetcherSearch { .. } |
-                Event::FetcherCleanUp(..) |
-                Event::FetcherImport(..) if !view.is::<Home>() => {
+                Event::FetcherRemoveDocument(..) |
+                Event::FetcherSearch { .. } if !view.is::<Home>() => {
                     if let Some(home) = history.get_mut(0).filter(|view| view.is::<Home>()) {
                         let (tx, _rx) = mpsc::channel();
                         home.handle_event(&evt, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
@@ -563,7 +560,7 @@ fn main() -> Result<(), Error> {
     context.library.flush();
 
     let path = Path::new(SETTINGS_PATH);
-    save_toml(&context.settings, path).context("Can't save settings.")?;
+    save_toml(&context.settings, path).context("can't save settings")?;
 
     Ok(())
 }

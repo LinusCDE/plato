@@ -1,12 +1,11 @@
 use std::ops::Drop;
 use anyhow::Error;
 use crate::geom::Rectangle;
-use crate::device::{CURRENT_DEVICE, Model};
+use crate::device::CURRENT_DEVICE;
 use super::{UpdateMode, Framebuffer};
 use libremarkable;
 use libremarkable::framebuffer::refresh::PartialRefreshMode;
 use libremarkable::framebuffer::FramebufferBase;
-use libremarkable::framebuffer::FramebufferDraw;
 use libremarkable::framebuffer::FramebufferIO;
 use libremarkable::framebuffer::FramebufferRefresh;
 use libremarkable::framebuffer::cgmath;

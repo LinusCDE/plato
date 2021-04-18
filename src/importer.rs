@@ -31,7 +31,7 @@ fn main() -> Result<(), Error> {
 
     opts.optflag("h", "help", "Print this help message.");
     opts.optflag("I", "import", "Import new files or update existing files.");
-    opts.optflag("C", "clean-up", "Remove entries with dangling paths.");
+    opts.optflag("C", "clean-up", "Remove reading states with unknown fingerprints.");
     opts.optflag("E", "extract-metadata-epub", "Extract metadata from ePUBs.");
     opts.optflag("F", "extract-metadata-filename", "Extract metadata from filenames.");
     opts.optflag("S", "consolidate", "Autocorrect simple typographic mistakes.");
@@ -40,7 +40,7 @@ fn main() -> Result<(), Error> {
     opts.optopt("a", "added-after", "Only process entries added after the given date-time.", "ADDED_DATETIME");
     opts.optopt("m", "library-mode", "The library mode (`database` or `filesystem`).", "LIBRARY_MODE");
 
-    let matches = opts.parse(&args).context("Failed to parse the command line arguments.")?;
+    let matches = opts.parse(&args).context("failed to parse the command line arguments")?;
 
     if matches.opt_present("h") {
         println!("{}", opts.usage("Usage: plato-import -h|-I|-C|-EFSN [-k ALLOWED_KINDS] [-a ADDED_DATETIME] [-m LIBRARY_MODE] LIBRARY_PATH"));
@@ -48,7 +48,7 @@ fn main() -> Result<(), Error> {
     }
 
     if matches.free.is_empty() {
-        return Err(format_err!("Missing required argument: library path."));
+        return Err(format_err!("missing required argument: library path"));
     }
 
     let library_path = Path::new(&matches.free[0]);
@@ -77,7 +77,7 @@ fn main() -> Result<(), Error> {
     let mut library = Library::new(&library_path, mode);
 
     if matches.opt_present("I") {
-        library.import(&library_path, &import_settings);
+        library.import(&import_settings);
     } else if matches.opt_present("C") {
         library.clean_up();
     } else {

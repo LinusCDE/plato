@@ -8,11 +8,11 @@ The following swipe sequences are recognized:
 
 ## Address bar
 
-When the navigation bar is present, this optional bar can be shown by swipping from the top bar to the shelf, and hidden by swipping from the shelf to the top bar.
+When the navigation bar is present, this optional bar can be shown by swiping from the top bar to the shelf, and hidden by swiping from the shelf to the top bar.
 
 ## Navigation bar
 
-This optional bar can be shown by swipping from the top bar to the shelf, and hidden by swipping from the shelf to the top bar.
+This optional bar can be shown by swiping from the top bar to the shelf, and hidden by swiping from the shelf to the top bar.
 
 This bar shows at most `max-levels` directory levels starting at the current directory. It can be used to navigate within the directory hierarchy.
 
@@ -26,6 +26,11 @@ This is a view of the books within the current directory.
 
 - Swipe west/east to go to the next/previous page.
 - Tap on a book entry to open it.
+
+The following swipe sequences are recognized:
+
+- Arrow west/east: go to the first/last page.
+- Top or bottom left/right corner: go to the previous/next status change.
 
 ## Search bar
 

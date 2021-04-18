@@ -1,4 +1,4 @@
-use crate::device::{Model, CURRENT_DEVICE};
+use crate::device::CURRENT_DEVICE;
 use crate::framebuffer::Display;
 use crate::geom::{LinearDir, Point};
 use crate::settings::ButtonScheme;
@@ -349,6 +349,10 @@ fn parse_usb_events(tx: &Sender<DeviceEvent>) {
     let path = CString::new("/tmp/nickel-hardware-status").unwrap();
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_NONBLOCK | libc::O_RDWR) };
 
+    if fd < 0 {
+        return;
+    }
+
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -681,152 +685,5 @@ pub fn parse_device_events(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::input::{
-        button_scheme_event, display_rotate_event, ButtonCode, ButtonStatus, EV_KEY, KEY_BACKWARD,
-        KEY_BUTTON_SCHEME, KEY_FORWARD, KEY_HOME, KEY_LIGHT, KEY_POWER, KEY_ROTATE_DISPLAY,
-        VAL_PRESS, VAL_RELEASE, VAL_REPEAT,
-    };
-    use crate::settings::ButtonScheme;
-
-    #[test]
-    fn test_button_status_try_from_raw() {
-        assert_eq!(
-            ButtonStatus::try_from_raw(VAL_RELEASE).unwrap(),
-            ButtonStatus::Released
-        );
-        assert_eq!(
-            ButtonStatus::try_from_raw(VAL_PRESS).unwrap(),
-            ButtonStatus::Pressed
-        );
-        assert_eq!(
-            ButtonStatus::try_from_raw(VAL_REPEAT).unwrap(),
-            ButtonStatus::Repeated
-        );
-        assert_eq!(ButtonStatus::try_from_raw(3), Option::None);
-    }
-
-    #[test]
-    fn test_button_code_from_raw() {
-        assert_eq!(
-            ButtonCode::from_raw(KEY_POWER, 0, ButtonScheme::Natural),
-            ButtonCode::Power
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_HOME, 0, ButtonScheme::Natural),
-            ButtonCode::Home
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_LIGHT, 0, ButtonScheme::Natural),
-            ButtonCode::Light
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 0, ButtonScheme::Natural),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 0, ButtonScheme::Natural),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_ROTATE_DISPLAY, 0, ButtonScheme::Natural),
-            ButtonCode::Raw(KEY_ROTATE_DISPLAY)
-        );
-    }
-
-    #[test]
-    fn test_button_code_directions_natural_button_scheme() {
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 0, ButtonScheme::Natural),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 1, ButtonScheme::Natural),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 2, ButtonScheme::Natural),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 3, ButtonScheme::Natural),
-            ButtonCode::Forward
-        );
-
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 0, ButtonScheme::Natural),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 1, ButtonScheme::Natural),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 2, ButtonScheme::Natural),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 3, ButtonScheme::Natural),
-            ButtonCode::Backward
-        );
-    }
-
-    #[test]
-    fn test_button_code_directions_inverted_button_scheme() {
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 0, ButtonScheme::Inverted),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 1, ButtonScheme::Inverted),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 2, ButtonScheme::Inverted),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_BACKWARD, 3, ButtonScheme::Inverted),
-            ButtonCode::Backward
-        );
-
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 0, ButtonScheme::Inverted),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 1, ButtonScheme::Inverted),
-            ButtonCode::Backward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 2, ButtonScheme::Inverted),
-            ButtonCode::Forward
-        );
-        assert_eq!(
-            ButtonCode::from_raw(KEY_FORWARD, 3, ButtonScheme::Inverted),
-            ButtonCode::Forward
-        );
-    }
-
-    #[test]
-    fn test_display_rotate_event() {
-        let input = display_rotate_event(2);
-
-        assert_eq!(input.kind, EV_KEY);
-        assert_eq!(input.code, KEY_ROTATE_DISPLAY);
-        assert_eq!(input.value, 2);
-    }
-
-    #[test]
-    fn test_button_scheme_event() {
-        let input = button_scheme_event(VAL_PRESS);
-
-        assert_eq!(input.kind, EV_KEY);
-        assert_eq!(input.code, KEY_BUTTON_SCHEME);
-        assert_eq!(input.value, VAL_PRESS);
     }
 }

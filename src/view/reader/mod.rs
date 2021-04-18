@@ -384,7 +384,7 @@ impl Reader {
         Reader {
             id,
             rect,
-            children: vec![],
+            children: Vec::new(),
             doc: Arc::new(Mutex::new(Box::new(doc))),
             cache: BTreeMap::new(),
             text: FxHashMap::default(),
@@ -621,7 +621,7 @@ impl Reader {
             if let Some((lines, _)) = doc.lines(Location::Exact(location)) {
                 if let Some(mut y_pos) = find_cut(&frame, frame.min.y + next_top_offset,
                                                   scale, LinearDir::Forward, &lines) {
-                    y_pos = y_pos.max(frame.min.y).min(frame.max.y - 1);
+                    y_pos = y_pos.clamp(frame.min.y, frame.max.y - 1);
                     next_top_offset = y_pos - frame.min.y;
                 }
             }
@@ -708,7 +708,7 @@ impl Reader {
                             if let Some((lines, _)) = doc.lines(Location::Exact(location)) {
                                 if let Some(mut y_pos) = find_cut(&frame, frame.min.y + next_top_offset,
                                                                   scale, LinearDir::Forward, &lines) {
-                                    y_pos = y_pos.max(frame.min.y).min(frame.max.y - 1);
+                                    y_pos = y_pos.clamp(frame.min.y, frame.max.y - 1);
                                     next_top_offset = y_pos - frame.min.y;
                                 }
                             }
@@ -773,11 +773,8 @@ impl Reader {
                         };
                         match action {
                             FinishedAction::Notify => {
-                                let notif = Notification::new(ViewId::BoundaryNotif,
-                                                              "No next page.".to_string(),
-                                                              hub,
-                                                              rq,
-                                                              context);
+                                let notif = Notification::new("No next page.".to_string(),
+                                                              hub, rq, context);
                                 self.children.push(Box::new(notif) as Box<dyn View>);
                             },
                             FinishedAction::Close => {
@@ -787,11 +784,8 @@ impl Reader {
                         }
                     },
                     CycleDir::Previous => {
-                        let notif = Notification::new(ViewId::BoundaryNotif,
-                                                      "No previous page.".to_string(),
-                                                      hub,
-                                                      rq,
-                                                      context);
+                        let notif = Notification::new("No previous page.".to_string(),
+                                                      hub, rq, context);
                         self.children.push(Box::new(notif) as Box<dyn View>);
                     },
                 }
@@ -919,7 +913,7 @@ impl Reader {
                     if (start >= words[0].location && start <= words[words.len()-1].location) ||
                        (end >= words[0].location && end <= words[words.len()-1].location) {
                         self.annotations.entry(chunk.location)
-                            .or_insert_with(|| Vec::new())
+                            .or_insert_with(Vec::new)
                             .push(annot.clone());
                     }
                 }
@@ -983,7 +977,7 @@ impl Reader {
                         if let Some((lines, _)) = doc.lines(Location::Exact(last_chunk.location)) {
                             let pixmap_frame = self.cache[&last_chunk.location].frame;
                             if let Some(mut y_pos) = find_cut(&pixmap_frame, last_chunk.frame.max.y, last_chunk.scale, LinearDir::Backward, &lines) {
-                                y_pos = y_pos.max(pixmap_frame.min.y).min(pixmap_frame.max.y - 1);
+                                y_pos = y_pos.clamp(pixmap_frame.min.y, pixmap_frame.max.y - 1);
                                 last_chunk.frame.max.y = y_pos;
                             }
                         }
@@ -1171,12 +1165,9 @@ impl Reader {
                                     self.rect.max.x,
                                     self.rect.max.y - small_height - small_thickness];
 
-            let number = match id {
-                Some(ViewId::GoToPageInput) |
-                Some(ViewId::GoToResultsPageInput) |
-                Some(ViewId::NamePageInput) => true,
-                _ => false,
-            };
+            let number = matches!(id, Some(ViewId::GoToPageInput) |
+                                      Some(ViewId::GoToResultsPageInput) |
+                                      Some(ViewId::NamePageInput));
 
             let index = rlocate::<Filler>(self).unwrap_or(0);
 
@@ -1750,7 +1741,7 @@ impl Reader {
             }
 
             let mut families = family_names(&context.settings.reader.font_path)
-                                           .map_err(|e| eprintln!("Can't get family names: {}", e))
+                                           .map_err(|e| eprintln!("Can't get family names: {:#}.", e))
                                            .unwrap_or_default();
             let current_family = self.info.reader.as_ref()
                                      .and_then(|r| r.font_family.clone())
@@ -3154,14 +3145,14 @@ impl View for Reader {
 
                 if let Some(sel) = selection {
                     let text = self.text_excerpt(sel).unwrap();
-                    self.info.reader.as_mut().map(|r| {
+                    if let Some(r) = self.info.reader.as_mut() {
                         r.annotations.push(Annotation {
                             selection: sel,
                             note: note.to_string(),
                             text,
                             modified: Local::now(),
                         });
-                    });
+                    }
                     if let Some(rect) = self.text_rect(sel) {
                         rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
@@ -3189,8 +3180,7 @@ impl View for Reader {
                         self.toggle_results_bar(true, rq, context);
                     },
                     None => {
-                        let notif = Notification::new(ViewId::InvalidSearchQueryNotif,
-                                                      "Invalid search query.".to_string(),
+                        let notif = Notification::new("Invalid search query.".to_string(),
                                                       hub, rq, context);
                         self.children.push(Box::new(notif) as Box<dyn View>);
                     },
@@ -3446,11 +3436,8 @@ impl View for Reader {
                 let results_count = self.search.as_ref().map(|s| s.results_count)
                                         .unwrap_or(usize::MAX);
                 if results_count == 0 {
-                    let notif = Notification::new(ViewId::NoSearchResultsNotif,
-                                                  "No search results.".to_string(),
-                                                  hub,
-                                                  rq,
-                                                  context);
+                    let notif = Notification::new("No search results.".to_string(),
+                                                  hub, rq, context);
                     self.children.push(Box::new(notif) as Box<dyn View>);
                     self.toggle_search_bar(true, hub, rq, context);
                     hub.send(Event::Focus(Some(ViewId::ReaderSearchInput))).ok();
@@ -3464,14 +3451,14 @@ impl View for Reader {
             Event::Select(EntryId::HighlightSelection) => {
                 if let Some(sel) = self.selection.take() {
                     let text = self.text_excerpt([sel.start, sel.end]).unwrap();
-                    self.info.reader.as_mut().map(|r| {
+                    if let Some(r) = self.info.reader.as_mut() {
                         r.annotations.push(Annotation {
                             selection: [sel.start, sel.end],
                             note: String::new(),
                             text,
                             modified: Local::now(),
                         });
-                    });
+                    }
                     if let Some(rect) = self.text_rect([sel.start, sel.end]) {
                         rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                     }
@@ -3497,11 +3484,8 @@ impl View for Reader {
                             self.search(text, query, hub, rq);
                         },
                         None => {
-                            let notif = Notification::new(ViewId::InvalidSearchQueryNotif,
-                                                          "Invalid search query.".to_string(),
-                                                          hub,
-                                                          rq,
-                                                          context);
+                            let notif = Notification::new("Invalid search query.".to_string(),
+                                                          hub, rq, context);
                             self.children.push(Box::new(notif) as Box<dyn View>);
                         },
                     }
@@ -3513,15 +3497,15 @@ impl View for Reader {
                 true
             },
             Event::Select(EntryId::GoToSelectedPageName) => {
-                self.selected_text().and_then(|text| {
+                if let Some(loc) = self.selected_text().and_then(|text| {
                     let end = text.find(|c: char| !c.is_ascii_digit() &&
-                                                  !Digit::from_char(c).is_ok() &&
+                                                  Digit::from_char(c).is_err() &&
                                                   !c.is_ascii_uppercase())
-                                  .unwrap_or(text.len());
+                                  .unwrap_or_else(|| text.len());
                     self.find_page_by_name(&text[..end])
-                }).map(|loc| {
+                }) {
                     self.go_to_page(loc, true, hub, rq, context);
-                });
+                }
                 if let Some(rect) = self.selection_rect() {
                     rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
                 }
@@ -3572,7 +3556,7 @@ impl View for Reader {
                     Err(e) => format!("{}", e),
                     Ok(()) => format!("Saved {}.", name),
                 };
-                let notif = Notification::new(ViewId::SaveDocumentNotif, msg, hub, rq, context);
+                let notif = Notification::new(msg, hub, rq, context);
                 self.children.push(Box::new(notif) as Box<dyn View>);
                 true
             },

@@ -1,25 +1,28 @@
 mod preset;
 
-use std::env;
-use std::fmt::{self, Debug};
-use std::path::PathBuf;
-use std::collections::BTreeMap;
-use fxhash::{FxHashMap, FxHashSet};
-use serde::{Serialize, Deserialize};
-use crate::metadata::{SortMethod, TextAlign};
-use crate::frontlight::LightLevels;
+use crate::app::{EVENT_TOUCH_SCREEN, EVENT_WACOM};
 use crate::color::BLACK;
 use crate::device::CURRENT_DEVICE;
-use crate::unit::mm_to_px;
-use crate::app::{EVENT_TOUCH_SCREEN, EVENT_WACOM};
+use crate::frontlight::LightLevels;
 use crate::input::ButtonCode;
+use crate::metadata::{SortMethod, TextAlign};
+use crate::unit::mm_to_px;
+use fxhash::FxHashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::env;
+use std::fmt::{self, Debug};
+use std::ops::Index;
+use std::path::PathBuf;
 
-pub use self::preset::{LightPreset, guess_frontlight};
+pub use self::preset::{guess_frontlight, LightPreset};
 
 pub const SETTINGS_PATH: &str = "Settings.toml";
 pub const DEFAULT_FONT_PATH: &str = "fonts";
 pub const INTERNAL_CARD_ROOT: &str = "/mnt/onboard";
 pub const EXTERNAL_CARD_ROOT: &str = "/mnt/sd";
+pub const LOGO_SPECIAL_PATH: &str = "logo:";
+pub const COVER_SPECIAL_PATH: &str = "cover:";
 // Default font size in points.
 pub const DEFAULT_FONT_SIZE: f32 = 11.0;
 // Default margin width in millimeters.
@@ -30,6 +33,8 @@ pub const DEFAULT_LINE_HEIGHT: f32 = 1.2;
 pub const DEFAULT_FONT_FAMILY: &str = "Libertinus Serif";
 // Default text alignment.
 pub const DEFAULT_TEXT_ALIGN: TextAlign = TextAlign::Left;
+pub const HYPHEN_PENALTY: i32 = 50;
+pub const STRETCH_TOLERANCE: f32 = 1.26;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,7 +82,7 @@ impl Default for RefreshQuality {
 #[serde(rename_all = "kebab-case")]
 pub enum InputSource {
     Touch, // Multitouch
-    Pen, // Wacom Digizer
+    Pen,   // Wacom Digizer
 }
 
 impl InputSource {
@@ -99,7 +104,6 @@ impl fmt::Display for InputSource {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RemarkableSettings {
@@ -115,6 +119,44 @@ impl Default for RemarkableSettings {
             refresh_quality: RefreshQuality::default(),
             input_sources: vec![InputSource::Touch, InputSource::Pen],
             ignored_buttons: vec![],
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntermKind {
+    Suspend,
+    PowerOff,
+    Share,
+}
+
+impl IntermKind {
+    pub fn text(&self) -> &str {
+        match self {
+            IntermKind::Suspend => "Sleeping",
+            IntermKind::PowerOff => "Powered off",
+            IntermKind::Share => "Shared",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Intermissions {
+    suspend: PathBuf,
+    power_off: PathBuf,
+    share: PathBuf,
+}
+
+impl Index<IntermKind> for Intermissions {
+    type Output = PathBuf;
+
+    fn index(&self, key: IntermKind) -> &Self::Output {
+        match key {
+            IntermKind::Suspend => &self.suspend,
+            IntermKind::PowerOff => &self.power_off,
+            IntermKind::Share => &self.share,
         }
     }
 }
@@ -138,8 +180,7 @@ pub struct Settings {
     pub remarkable: RemarkableSettings,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<LibrarySettings>,
-    #[serde(skip_serializing_if = "FxHashMap::is_empty")]
-    pub intermission_images: FxHashMap<String, PathBuf>,
+    pub intermissions: Intermissions,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub frontlight_presets: Vec<LightPreset>,
     pub home: HomeSettings,
@@ -177,8 +218,9 @@ impl Default for LibrarySettings {
     fn default() -> Self {
         LibrarySettings {
             name: "Unnamed".to_string(),
-            path: env::current_dir().ok()
-                      .unwrap_or_else(|| PathBuf::from("/")),
+            path: env::current_dir()
+                .ok()
+                .unwrap_or_else(|| PathBuf::from("/")),
             mode: LibraryMode::Database,
             sort_method: SortMethod::Opened,
             first_column: FirstColumn::TitleAndAuthor,
@@ -327,7 +369,6 @@ pub struct HomeSettings {
     pub max_trash_size: u64,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct RefreshRateSettings {
@@ -349,7 +390,15 @@ pub struct ReaderSettings {
     pub margin_width: i32,
     pub line_height: f32,
     pub dithered_kinds: FxHashSet<String>,
+    pub paragraph_breaker: ParagraphBreakerSettings,
     pub refresh_rate: RefreshRateSettings,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ParagraphBreakerSettings {
+    pub hyphen_penalty: i32,
+    pub stretch_tolerance: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -393,10 +442,19 @@ impl Default for HomeSettings {
     }
 }
 
+impl Default for ParagraphBreakerSettings {
+    fn default() -> Self {
+        ParagraphBreakerSettings {
+            hyphen_penalty: HYPHEN_PENALTY,
+            stretch_tolerance: STRETCH_TOLERANCE,
+        }
+    }
+}
+
 impl Default for ReaderSettings {
     fn default() -> Self {
         ReaderSettings {
-            finished: FinishedAction::Notify,
+            finished: FinishedAction::Close,
             south_east_corner: SouthEastCornerAction::GoToPage,
             strip_width: 0.6,
             corner_width: 0.4,
@@ -406,7 +464,11 @@ impl Default for ReaderSettings {
             text_align: DEFAULT_TEXT_ALIGN,
             margin_width: DEFAULT_MARGIN_WIDTH,
             line_height: DEFAULT_LINE_HEIGHT,
-            dithered_kinds: ["cbz", "png", "jpg", "jpeg"].iter().map(|k| k.to_string()).collect(),
+            dithered_kinds: ["cbz", "png", "jpg", "jpeg"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
+            paragraph_breaker: ParagraphBreakerSettings::default(),
             refresh_rate: RefreshRateSettings::default(),
         }
     }
@@ -418,9 +480,10 @@ impl Default for ImportSettings {
             unshare_trigger: true,
             startup_trigger: true,
             extract_epub_metadata: true,
-            allowed_kinds: ["pdf", "djvu", "epub", "fb2",
-                            "xps", "oxps", "html", "htm",
-                            "cbz", "png", "jpg", "jpeg"].iter().map(|k| k.to_string()).collect(),
+            allowed_kinds: ["pdf", "djvu", "epub", "fb2", "xps", "oxps", "cbz"]
+                .iter()
+                .map(|k| k.to_string())
+                .collect(),
         }
     }
 }
@@ -437,23 +500,23 @@ impl Default for BatterySettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            selected_library: if CURRENT_DEVICE.has_removable_storage() { 1 } else { 0 },
-            libraries: vec![
-                LibrarySettings {
-                    name: "Media".to_string(),
-                    path: PathBuf::from("media"),
-                    hooks: vec![
-                        Hook {
-                            path: PathBuf::from("Articles"),
-                            program: PathBuf::from("bin/article_fetcher/article_fetcher"),
-                            sort_method: Some(SortMethod::Added),
-                            first_column: Some(FirstColumn::TitleAndAuthor),
-                            second_column: Some(SecondColumn::Progress),
-                        }
-                    ],
-                    .. Default::default()
-                },
-            ],
+            selected_library: if CURRENT_DEVICE.has_removable_storage() {
+                1
+            } else {
+                0
+            },
+            libraries: vec![LibrarySettings {
+                name: "Media".to_string(),
+                path: PathBuf::from("media"),
+                hooks: vec![Hook {
+                    path: PathBuf::from("Articles"),
+                    program: PathBuf::from("bin/article_fetcher/article_fetcher"),
+                    sort_method: Some(SortMethod::Added),
+                    first_column: Some(FirstColumn::TitleAndAuthor),
+                    second_column: Some(SecondColumn::Progress),
+                }],
+                ..Default::default()
+            }],
             keyboard_layout: "English".to_string(),
             frontlight: true,
             wifi: false,
@@ -465,7 +528,11 @@ impl Default for Settings {
             auto_power_off: 3,
             time_format: "%H:%M".to_string(),
             date_format: "%A, %B %-d, %Y".to_string(),
-            intermission_images: FxHashMap::default(),
+            intermissions: Intermissions {
+                suspend: PathBuf::from(LOGO_SPECIAL_PATH),
+                power_off: PathBuf::from(LOGO_SPECIAL_PATH),
+                share: PathBuf::from(LOGO_SPECIAL_PATH),
+            },
             home: HomeSettings::default(),
             reader: ReaderSettings::default(),
             import: ImportSettings::default(),

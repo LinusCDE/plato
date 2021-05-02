@@ -41,6 +41,7 @@ use crate::view::menu::{Menu, MenuKind};
 use crate::view::notification::Notification;
 use crate::settings::{guess_frontlight, FinishedAction, SouthEastCornerAction};
 use crate::settings::{DEFAULT_FONT_FAMILY, DEFAULT_TEXT_ALIGN, DEFAULT_LINE_HEIGHT, DEFAULT_MARGIN_WIDTH};
+use crate::settings::{HYPHEN_PENALTY, STRETCH_TOLERANCE};
 use crate::frontlight::LightLevels;
 use crate::gesture::GestureEvent;
 use crate::document::{Document, open, Location, TextLocation, BoundedText, Neighbors, BYTES_PER_PAGE};
@@ -230,7 +231,6 @@ impl Reader {
             let (width, height) = context.display.dims;
             let font_size = info.reader.as_ref().and_then(|r| r.font_size)
                                 .unwrap_or(settings.reader.font_size);
-            let first_location = doc.resolve_location(Location::Exact(0))?;
 
             doc.layout(width, height, font_size, CURRENT_DEVICE.dpi);
 
@@ -261,6 +261,20 @@ impl Reader {
             if text_align != DEFAULT_TEXT_ALIGN {
                 doc.set_text_align(text_align);
             }
+
+            let hyphen_penalty = settings.reader.paragraph_breaker.hyphen_penalty;
+
+            if hyphen_penalty != HYPHEN_PENALTY {
+                doc.set_hyphen_penalty(hyphen_penalty);
+            }
+
+            let stretch_tolerance = settings.reader.paragraph_breaker.stretch_tolerance;
+
+            if stretch_tolerance != STRETCH_TOLERANCE {
+                doc.set_stretch_tolerance(stretch_tolerance);
+            }
+
+            let first_location = doc.resolve_location(Location::Exact(0))?;
 
             let mut view_port = ViewPort::default();
             let mut contrast = Contrast::default();
@@ -3647,7 +3661,8 @@ impl View for Reader {
             Event::Select(EntryId::Quit) |
             Event::Select(EntryId::Reboot) |
             Event::Select(EntryId::RebootInNickel) |
-            Event::Back => {
+            Event::Back |
+            Event::Suspend => {
                 self.quit(context);
                 false
             },

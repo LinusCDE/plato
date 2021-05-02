@@ -34,7 +34,6 @@ use crate::view::menu::{Menu, MenuKind};
 use crate::view::menu_entry::MenuEntry;
 use crate::view::search_bar::SearchBar;
 use crate::view::notification::Notification;
-use crate::view::intermission::IntermKind;
 use super::top_bar::TopBar;
 use self::address_bar::AddressBar;
 use self::navigation_bar::NavigationBar;
@@ -65,6 +64,7 @@ pub struct Home {
     reverse_order: bool,
     visible_books: Metadata,
     current_directory: PathBuf,
+    target_document: Option<PathBuf>,
     background_fetchers: FxHashMap<u32, Fetcher>,
 }
 
@@ -201,6 +201,7 @@ impl Home {
             reverse_order,
             visible_books,
             current_directory,
+            target_document: None,
             background_fetchers: FxHashMap::default(),
         })
     }
@@ -764,6 +765,36 @@ impl Home {
         }
     }
 
+    fn toggle_rename_document(&mut self, enable: Option<bool>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+        if let Some(index) = locate_by_id(self, ViewId::RenameDocument) {
+            if let Some(true) = enable {
+                return;
+            }
+            self.target_document = None;
+            rq.add(RenderData::expose(*self.child(index).rect(), UpdateMode::Gui));
+            self.children.remove(index);
+            if let Some(ViewId::RenameDocumentInput) = self.focus {
+                self.toggle_keyboard(false, true, Some(ViewId::RenameDocumentInput), hub, rq, context);
+            }
+        } else {
+            if let Some(false) = enable {
+                return;
+            }
+            let mut ren_doc = NamedInput::new("Rename document".to_string(),
+                                              ViewId::RenameDocument,
+                                              ViewId::RenameDocumentInput,
+                                              21, context);
+            if let Some(text) = self.target_document.as_ref()
+                                    .and_then(|path| path.file_name())
+                                    .and_then(|file_name| file_name.to_str()) {
+                ren_doc.set_text(text, rq, context);
+            }
+            rq.add(RenderData::new(ren_doc.id(), *ren_doc.rect(), UpdateMode::Gui));
+            hub.send(Event::Focus(Some(ViewId::RenameDocumentInput))).ok();
+            self.children.push(Box::new(ren_doc) as Box<dyn View>);
+        }
+    }
+
     fn toggle_go_to_page(&mut self, enable: Option<bool>, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate_by_id(self, ViewId::GoToPage) {
             if let Some(true) = enable {
@@ -865,7 +896,6 @@ impl Home {
             let book_index = self.book_index(index);
             let info = &self.visible_books[book_index];
             let path = &info.file.path;
-            let full_path = context.library.home.join(path);
 
             let mut entries = Vec::new();
 
@@ -893,34 +923,28 @@ impl Home {
                                                                     EntryId::SetStatus(path.clone(), *s)))
                                  .collect();
             entries.push(EntryKind::SubMenu("Mark As".to_string(), submenu));
-
-            {
-                let images = &context.settings.intermission_images;
-                let submenu = [IntermKind::Suspend,
-                               IntermKind::PowerOff,
-                               IntermKind::Share].iter().map(|k| {
-                                   EntryKind::CheckBox(k.label().to_string(),
-                                                       EntryId::ToggleIntermissionImage(*k, path.clone()),
-                                                       images.get(k.key()) == Some(&full_path))
-                               }).collect::<Vec<EntryKind>>();
-
-
-                entries.push(EntryKind::SubMenu("Set As".to_string(), submenu))
-            }
-
             entries.push(EntryKind::Separator);
+
             let selected_library = context.settings.selected_library;
             let libraries = context.settings.libraries.iter().enumerate()
                                    .filter(|(index, _)| *index != selected_library)
-                                   .map(|(index, lib)|  {
-                                       EntryKind::Command(lib.name.clone(),
-                                                          EntryId::MoveTo(path.clone(), index))
-                                   }).collect::<Vec<EntryKind>>();
+                                   .map(|(index, lib)| (index, lib.name.clone()))
+                                   .collect::<Vec<(usize, String)>>();
             if !libraries.is_empty() {
-                entries.push(EntryKind::SubMenu("Move To".to_string(), libraries));
-
+                let copy_to = libraries.iter().map(|(index, name)| {
+                    EntryKind::Command(name.clone(),
+                                       EntryId::CopyTo(path.clone(), *index))
+                }).collect::<Vec<EntryKind>>();
+                let move_to = libraries.iter().map(|(index, name)| {
+                    EntryKind::Command(name.clone(),
+                                       EntryId::MoveTo(path.clone(), *index))
+                }).collect::<Vec<EntryKind>>();
+                entries.push(EntryKind::SubMenu("Copy To".to_string(), copy_to));
+                entries.push(EntryKind::SubMenu("Move To".to_string(), move_to));
             }
 
+            entries.push(EntryKind::Command("Rename".to_string(),
+                                            EntryId::Rename(path.clone())));
             entries.push(EntryKind::Command("Remove".to_string(),
                                             EntryId::Remove(path.clone())));
 
@@ -1058,6 +1082,12 @@ impl Home {
         self.children.push(Box::new(notif) as Box<dyn View>);
     }
 
+    fn rename(&mut self, path: &Path, file_name: &str, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) -> Result<(), Error> {
+        context.library.rename(path, file_name)?;
+        self.refresh_visibles(true, false, hub, rq, context);
+        Ok(())
+    }
+
     fn remove(&mut self, path: &Path, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) -> Result<(), Error> {
         let full_path = context.library.home.join(path);
         if full_path.exists() {
@@ -1067,7 +1097,6 @@ impl Home {
             }
             let mut trash = Library::new(trash_path, LibraryMode::Database);
             context.library.move_to(path, &mut trash)?;
-            context.settings.intermission_images.retain(|_, path| path != &full_path);
             let (mut files, _) = trash.list(&trash.home, None, false);
             let mut size = files.iter().map(|info| info.file.size).sum::<u64>();
             if size > context.settings.home.max_trash_size {
@@ -1086,6 +1115,14 @@ impl Home {
             context.library.remove(path)?;
         }
         self.refresh_visibles(true, false, hub, rq, context);
+        Ok(())
+    }
+
+    fn copy_to(&mut self, path: &Path, index: usize, context: &mut Context) -> Result<(), Error> {
+        let library_settings = &context.settings.libraries[index];
+        let mut library = Library::new(&library_settings.path, library_settings.mode);
+        context.library.copy_to(path, &mut library)?;
+        library.flush();
         Ok(())
     }
 
@@ -1464,6 +1501,10 @@ impl View for Home {
                 self.toggle_go_to_page(Some(false), hub, rq, context);
                 true
             },
+            Event::Close(ViewId::RenameDocument) => {
+                self.toggle_rename_document(Some(false), hub, rq, context);
+                true
+            },
             Event::Select(EntryId::Sort(sort_method)) => {
                 let selected_library = context.settings.selected_library;
                 context.settings.libraries[selected_library].sort_method = sort_method;
@@ -1551,6 +1592,14 @@ impl View for Home {
                 }
                 true
             },
+            Event::Submit(ViewId::RenameDocumentInput, ref file_name) => {
+                if let Some(ref path) = self.target_document.take() {
+                    self.rename(path, file_name, hub, rq, context)
+                        .map_err(|e| eprintln!("Can't rename document: {:#}.", e))
+                        .ok();
+                }
+                true
+            },
             Event::NavigationBarResized(_) => {
                 self.adjust_shelf_top_edge();
                 self.update_shelf(true, hub, rq, context);
@@ -1564,9 +1613,20 @@ impl View for Home {
                 self.empty_trash(hub, rq, context);
                 true
             },
+            Event::Select(EntryId::Rename(ref path)) => {
+                self.target_document = Some(path.clone());
+                self.toggle_rename_document(Some(true), hub, rq, context);
+                true
+            },
             Event::Select(EntryId::Remove(ref path)) | Event::FetcherRemoveDocument(_, ref path) => {
                 self.remove(path, hub, rq, context)
                     .map_err(|e| eprintln!("Can't remove document: {:#}.", e))
+                    .ok();
+                true
+            },
+            Event::Select(EntryId::CopyTo(ref path, index)) => {
+                self.copy_to(path, index, context)
+                    .map_err(|e| eprintln!("Can't copy document: {:#}.", e))
                     .ok();
                 true
             },

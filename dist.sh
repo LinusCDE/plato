@@ -39,6 +39,7 @@ find dist/keyboard-layouts -name '*-user.json' -delete
 find dist/hyphenation-patterns -name '*.bounds' -delete
 cp target/armv7-unknown-linux-gnueabihf/release/plato dist/
 cp contrib/*.sh dist
+cp contrib/Settings-sample.toml dist
 cp LICENSE-AGPLv3 dist
 
 patchelf --remove-rpath dist/libs/*

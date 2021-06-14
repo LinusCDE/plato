@@ -107,9 +107,11 @@ impl fmt::Display for InputSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct RemarkableSettings {
+    #[serde(default)]
     pub refresh_quality: RefreshQuality,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub input_sources: Vec<InputSource>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub ignored_buttons: Vec<ButtonCode>,
 }
 

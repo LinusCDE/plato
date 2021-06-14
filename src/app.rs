@@ -238,6 +238,11 @@ fn build_context(fb: Box<dyn Framebuffer>) -> Result<Context, Error> {
         settings.selected_library = 0;
     }
 
+    if settings.remarkable.input_sources.is_empty() {
+        settings.remarkable.input_sources = crate::settings::RemarkableSettings::default().input_sources;
+        println!("WARN: remarkable input-sources is empty. Changed to default to prevent a unusable GUI.");
+    }
+
     let library_settings = &settings.libraries[settings.selected_library];
     let library = Library::new(&library_settings.path, library_settings.mode);
 

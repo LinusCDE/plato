@@ -65,8 +65,8 @@ pub const KEY_HOME: u16 = ecodes::KEY_HOME;
 pub const KEY_LIGHT: u16 = 90; // Unused on reMarkable
 pub const KEY_BACKWARD: u16 = ecodes::KEY_LEFT;
 pub const KEY_FORWARD: u16 = ecodes::KEY_RIGHT;
-pub const PEN_ERASE: u16 = 331;
-pub const PEN_HIGHLIGHT: u16 = 332;
+pub const PEN_ERASE: u16 = ecodes::BTN_TOOL_RUBBER;
+pub const PEN_HIGHLIGHT: u16 = ecodes::BTN_TOOL_PEN;
 pub const SLEEP_COVER: [u16; 2] = [59, 35];
 // Synthetic touch button
 pub const BTN_TOUCH: u16 = 330;
@@ -168,8 +168,11 @@ impl ButtonCode {
             KEY_LIGHT => ButtonCode::Light,
             KEY_BACKWARD => resolve_button_direction(LinearDir::Backward, rotation, button_scheme),
             KEY_FORWARD => resolve_button_direction(LinearDir::Forward, rotation, button_scheme),
-            // TODO:
-            // Attempt to aad ButtonCode: highlight and/or erase
+            // TODO: Attempt to add ButtonCode: highlight and/or erase
+            //PEN_ERASE => ButtonCode::Erase,
+            //PEN_HIGHLIGHT => ButtonCode::Highlight,
+            // Would work ↑ but usage doesnt seem to make sense this way.
+            // Most likely a dedicated buttont hat is used in another manner on kobo devices.
             _ => ButtonCode::Raw(code),
         }
     }

@@ -2,18 +2,28 @@
 
 exit # Stubbed
 
-lsmod | grep -q g_file_storage || exit 1
+LOADED_MODULE=$(grep -oE '^g_(file|mass)_storage\b' /proc/modules)
 
-rmmod g_file_storage
+case "$LOADED_MODULE" in
+	g_file_storage)
+		rmmod g_file_storage
 
-case "$PLATFORM" in
-	mx6[su]ll-ntx)
-		rmmod usb_f_mass_storage
-		rmmod libcomposite
-		rmmod configfs
+		case "$PLATFORM" in
+			mx6[su]ll-ntx)
+				rmmod usb_f_mass_storage
+				rmmod libcomposite
+				rmmod configfs
+				;;
+			*)
+				grep -q '^arcotg_udc\b' /proc/modules && rmmod arcotg_udc
+				;;
+		esac
+		;;
+	g_mass_storage)
+		rmmod g_mass_storage
 		;;
 	*)
-		lsmod | grep -q arcotg_udc && rmmod arcotg_udc
+		exit 1
 		;;
 esac
 

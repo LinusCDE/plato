@@ -1,10 +1,12 @@
-use std::io::{Read, Seek, SeekFrom};
 use std::fs::File;
 use std::path::Path;
-use super::{Battery, Status};
+use std::io::{Read, Seek, SeekFrom};
 use anyhow::{Error, format_err};
+use crate::device::CURRENT_DEVICE;
+use super::{Battery, Status};
 
-const BATTERY_INTERFACE: &str = "/sys/class/power_supply/mc13892_bat";
+const BATTERY_INTERFACE_A: &str = "/sys/class/power_supply/mc13892_bat";
+const BATTERY_INTERFACE_B: &str = "/sys/class/power_supply/battery";
 
 const BATTERY_CAPACITY: &str = "capacity";
 const BATTERY_STATUS: &str = "status";
@@ -17,7 +19,11 @@ pub struct KoboBattery {
 
 impl KoboBattery {
     pub fn new() -> Result<KoboBattery, Error> {
-        let base = Path::new(BATTERY_INTERFACE);
+        let base = if CURRENT_DEVICE.mark() != 8 {
+            Path::new(BATTERY_INTERFACE_A)
+        } else {
+            Path::new(BATTERY_INTERFACE_B)
+        };
         let capacity = File::open(base.join(BATTERY_CAPACITY))?;
         let status = File::open(base.join(BATTERY_STATUS))?;
         Ok(KoboBattery { capacity, status })

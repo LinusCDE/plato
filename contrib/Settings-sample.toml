@@ -81,6 +81,12 @@ finished = "close"
 # The action triggered when tapping the south-east corner.
 # Possible values: "go-to-page", "next-page".
 south-east-corner = "go-to-page"
+# The action triggered when tapping the south strip.
+# Possible values: "toggle-bars", "next-page".
+south-strip-action = "toggle-bars"
+# The action triggered when tapping the west strip.
+# Possible values: "previous-page", "next-page".
+west-strip-action = "previous-page"
 # The width ratio, relative to `min(W, H) / 2`, of the strip and corner touch regions.
 # Launch the *Touch Events* application to display the current touch regions.
 strip-width = 0.6
@@ -89,13 +95,17 @@ corner-width = 0.4
 font-path = "/mnt/onboard/fonts"
 # The default serif font.
 font-family = "Libertinus Serif"
-# The default font size, in points.
+# The default, minimum and maximum font sizes, in points.
 font-size = 11.0
+min-font-size = 5.5
+max-font-size = 16.5
 # The default text alignment.
 # Possible values: "left", "right", "center", "justify".
 text-align = "left"
-# The default margin width, in millimeters.
+# The default, minimum and maximum margin widths, in millimeters.
 margin-width = 8
+min-margin-width = 0
+max-margin-width = 10
 # The default line height, in ems.
 line-height = 1.2
 # The file extensions of the files that will automatically be dithered
@@ -119,9 +129,10 @@ inverted = 2
 unshare-trigger = true
 # Start the import process when *Plato* starts.
 startup-trigger = true
-# Extract the metadata of EPUB documents.
-extract-epub-metadata = true
-# The file extensions of the file that will be considered during the
+# The file extensions of the documents for which the metadata extraction
+# process will occur.
+metadata-kinds = ["epub", "pdf", "djvu"]
+# The file extensions of the documents that will be considered during the
 # import process.
 allowed-kinds = ["djvu", "xps", "fb2", "pdf", "oxps", "cbz", "epub"]
 

@@ -1,60 +1,82 @@
-use std::fs;
-use std::env;
-use std::thread;
-use std::process::Command;
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
-use anyhow::{Error, Context as ResultExt, format_err};
-use fxhash::FxHashMap;
-use chrono::Local;
-use globset::Glob;
-use lazy_static::lazy_static;
-use walkdir::WalkDir;
-use rand_core::SeedableRng;
-use rand_xoshiro::Xoroshiro128Plus;
-use crate::dictionary::{Dictionary, load_dictionary_from_file};
-use crate::framebuffer::{Framebuffer, RemarkableFramebuffer, Display, UpdateMode};
-use crate::view::{View, Event, EntryId, EntryKind, ViewId, AppCmd, RenderData, RenderQueue};
-use crate::view::{handle_event, process_render_queue};
-use crate::view::common::{locate, locate_by_id, transfer_notifications, overlapping_rectangle};
-use crate::view::common::{toggle_input_history_menu, toggle_keyboard_layout_menu};
-use crate::view::frontlight::FrontlightWindow;
-use crate::view::menu::{Menu, MenuKind};
-use crate::view::keyboard::{Layout};
-use crate::view::dictionary::Dictionary as DictionaryApp;
+use crate::battery::{Battery, RemarkableBattery};
+use crate::device::{FrontlightKind, Orientation, CURRENT_DEVICE};
+use crate::dictionary::{load_dictionary_from_file, Dictionary};
+use crate::document::sys_info_as_html;
+use crate::font::Fonts;
+use crate::framebuffer::{Display, Framebuffer, RemarkableFramebuffer, UpdateMode};
+use crate::frontlight::{
+    FakeFrontlight, Frontlight, NaturalFrontlight, PremixedFrontlight, StandardFrontlight,
+};
+use crate::geom::{DiagDir, Rectangle, Region};
+use crate::gesture::{gesture_events, GestureEvent};
+use crate::helpers::{load_json, load_toml, save_toml, IsHidden};
+use crate::input::{
+    button_scheme_event, device_events, display_rotate_event, raw_events, usb_events,
+};
+use crate::input::{
+    ButtonCode, ButtonStatus, DeviceEvent, InputFilterCommand, PowerSource, VAL_PRESS, VAL_RELEASE,
+};
+use crate::library::Library;
+use crate::lightsensor::{KoboLightSensor, LightSensor};
+use crate::rtc::Rtc;
+use crate::settings::{
+    ButtonScheme, InputSource, IntermKind, RotationLock, Settings, SETTINGS_PATH,
+};
 use crate::view::calculator::Calculator;
+use crate::view::common::{locate, locate_by_id, overlapping_rectangle, transfer_notifications};
+use crate::view::common::{toggle_input_history_menu, toggle_keyboard_layout_menu};
+use crate::view::dialog::Dialog;
+use crate::view::dictionary::Dictionary as DictionaryApp;
+use crate::view::frontlight::FrontlightWindow;
+use crate::view::home::Home;
+use crate::view::intermission::Intermission;
+use crate::view::keyboard::Layout;
+use crate::view::menu::{Menu, MenuKind};
+use crate::view::notification::Notification;
+use crate::view::reader::Reader;
+use crate::view::rotation_values::RotationValues;
 use crate::view::sketch::Sketch;
 use crate::view::touch_events::TouchEvents;
-use crate::view::rotation_values::RotationValues;
-use crate::document::sys_info_as_html;
-use crate::input::{DeviceEvent, PowerSource, ButtonCode, ButtonStatus, VAL_RELEASE, VAL_PRESS, InputFilterCommand};
-use crate::input::{raw_events, device_events, usb_events, display_rotate_event, button_scheme_event};
-use crate::gesture::{GestureEvent, gesture_events};
-use crate::helpers::{load_json, load_toml, save_toml, IsHidden};
-use crate::settings::{ButtonScheme, Settings, SETTINGS_PATH, RotationLock, InputSource, IntermKind};
-use crate::frontlight::{Frontlight, StandardFrontlight, NaturalFrontlight, PremixedFrontlight, FakeFrontlight};
-use crate::lightsensor::{LightSensor, KoboLightSensor};
-use crate::battery::{Battery, RemarkableBattery};
-use crate::geom::{Rectangle, DiagDir, Region};
-use crate::view::home::Home;
-use crate::view::reader::Reader;
-use crate::view::dialog::Dialog;
-use crate::view::intermission::Intermission;
-use crate::view::notification::Notification;
-use crate::device::{CURRENT_DEVICE, Orientation, FrontlightKind};
-use crate::library::Library;
-use crate::font::Fonts;
-use crate::rtc::Rtc;
+use crate::view::{handle_event, process_render_queue, wait_for_all};
+use crate::view::{
+    AppCmd, EntryId, EntryKind, Event, RenderData, RenderQueue, UpdateData, View, ViewId,
+};
+use anyhow::{format_err, Context as ResultExt, Error};
+use chrono::Local;
+use fxhash::FxHashMap;
+use globset::Glob;
+use lazy_static::lazy_static;
+use rand_core::SeedableRng;
+use rand_xoshiro::Xoroshiro128Plus;
+use std::collections::{BTreeMap, VecDeque};
+use std::env;
+use std::fs::{self, File};
+use std::path::Path;
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
+use walkdir::WalkDir;
 
 pub const APP_NAME: &str = "Plato";
 const FB_DEVICE: &str = "/dev/fb0";
 const RTC_DEVICE: &str = "/dev/rtc0";
 lazy_static! {
-    pub static ref EVENT_BUTTONS: String = libremarkable::input::scan::SCANNED.gpio_path.to_str().unwrap().to_owned();
-    pub static ref EVENT_TOUCH_SCREEN: String = libremarkable::input::scan::SCANNED.multitouch_path.to_str().unwrap().to_owned();
-    pub static ref EVENT_WACOM: String = libremarkable::input::scan::SCANNED.wacom_path.to_str().unwrap().to_owned();
+    pub static ref EVENT_BUTTONS: String = libremarkable::input::scan::SCANNED
+        .gpio_path
+        .to_str()
+        .unwrap()
+        .to_owned();
+    pub static ref EVENT_TOUCH_SCREEN: String = libremarkable::input::scan::SCANNED
+        .multitouch_path
+        .to_str()
+        .unwrap()
+        .to_owned();
+    pub static ref EVENT_WACOM: String = libremarkable::input::scan::SCANNED
+        .wacom_path
+        .to_str()
+        .unwrap()
+        .to_owned();
 }
 const KOBO_UPDATE_BUNDLE: &str = "/mnt/onboard/.kobo/KoboRoot.tgz";
 const KEYBOARD_LAYOUTS_DIRNAME: &str = "keyboard-layouts";
@@ -91,18 +113,41 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(fb: Box<dyn Framebuffer>, rtc: Option<Rtc>, library: Library,
-               settings: Settings, fonts: Fonts, battery: Box<dyn Battery>,
-               frontlight: Box<dyn Frontlight>, lightsensor: Box<dyn LightSensor>) -> Context {
+    pub fn new(
+        fb: Box<dyn Framebuffer>,
+        rtc: Option<Rtc>,
+        library: Library,
+        settings: Settings,
+        fonts: Fonts,
+        battery: Box<dyn Battery>,
+        frontlight: Box<dyn Frontlight>,
+        lightsensor: Box<dyn LightSensor>,
+    ) -> Context {
         let dims = fb.dims();
         let rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
         let rng = Xoroshiro128Plus::seed_from_u64(Local::now().timestamp_nanos() as u64);
-        Context { fb, rtc, display: Display { dims, rotation },
-                  library, settings, fonts, dictionaries: BTreeMap::new(),
-                  keyboard_layouts: BTreeMap::new(), input_history: FxHashMap::default(),
-                  battery, frontlight, lightsensor, notification_index: 0,
-                  kb_rect: Rectangle::default(), rng, plugged: false, covered: false,
-                  shared: false, online: false, killed_xochitl: false }
+        Context {
+            fb,
+            rtc,
+            display: Display { dims, rotation },
+            library,
+            settings,
+            fonts,
+            dictionaries: BTreeMap::new(),
+            keyboard_layouts: BTreeMap::new(),
+            input_history: FxHashMap::default(),
+            battery,
+            frontlight,
+            lightsensor,
+            notification_index: 0,
+            kb_rect: Rectangle::default(),
+            rng,
+            plugged: false,
+            covered: false,
+            shared: false,
+            online: false,
+            killed_xochitl: false,
+        }
     }
 
     pub fn batch_import(&mut self) {
@@ -120,8 +165,11 @@ impl Context {
 
     pub fn load_keyboard_layouts(&mut self) {
         let glob = Glob::new("**/*.json").unwrap().compile_matcher();
-        for entry in WalkDir::new(Path::new(KEYBOARD_LAYOUTS_DIRNAME)).min_depth(1)
-                             .into_iter().filter_entry(|e| !e.is_hidden()) {
+        for entry in WalkDir::new(Path::new(KEYBOARD_LAYOUTS_DIRNAME))
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|e| !e.is_hidden())
+        {
             if entry.is_err() {
                 continue;
             }
@@ -138,8 +186,11 @@ impl Context {
 
     pub fn load_dictionaries(&mut self) {
         let glob = Glob::new("**/*.index").unwrap().compile_matcher();
-        for entry in WalkDir::new(Path::new(DICTIONARIES_DIRNAME)).min_depth(1)
-                             .into_iter().filter_entry(|e| !e.is_hidden()) {
+        for entry in WalkDir::new(Path::new(DICTIONARIES_DIRNAME))
+            .min_depth(1)
+            .into_iter()
+            .filter_entry(|e| !e.is_hidden())
+        {
             if entry.is_err() {
                 continue;
             }
@@ -155,7 +206,8 @@ impl Context {
             }
             if let Ok(mut dict) = load_dictionary_from_file(&content_path, &index_path) {
                 let name = dict.short_name().ok().unwrap_or_else(|| {
-                    index_path.file_stem()
+                    index_path
+                        .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default()
                 });
@@ -169,8 +221,7 @@ impl Context {
             return;
         }
 
-        let history = self.input_history.entry(id)
-                          .or_insert_with(VecDeque::new);
+        let history = self.input_history.entry(id).or_insert_with(VecDeque::new);
 
         if history.front().map(String::as_str) != Some(text) {
             history.push_front(text.to_string());
@@ -223,12 +274,12 @@ struct HistoryItem {
 
 fn build_context(fb: Box<dyn Framebuffer>) -> Result<Context, Error> {
     let rtc = Rtc::new(RTC_DEVICE)
-                  .map_err(|e| eprintln!("Can't open RTC device: {:#}.", e))
-                  .ok();
+        .map_err(|e| eprintln!("Can't open RTC device: {:#}.", e))
+        .ok();
     let path = Path::new(SETTINGS_PATH);
     let mut settings = load_toml::<Settings, _>(path)
-                                .map_err(|e| eprintln!("Can't load settings: {:#}.", e))
-                                .unwrap_or_default();
+        .map_err(|e| eprintln!("Can't load settings: {:#}.", e))
+        .unwrap_or_default();
 
     if settings.libraries.is_empty() {
         return Err(format_err!("no libraries found"));
@@ -239,7 +290,8 @@ fn build_context(fb: Box<dyn Framebuffer>) -> Result<Context, Error> {
     }
 
     if settings.remarkable.input_sources.is_empty() {
-        settings.remarkable.input_sources = crate::settings::RemarkableSettings::default().input_sources;
+        settings.remarkable.input_sources =
+            crate::settings::RemarkableSettings::default().input_sources;
         println!("WARN: remarkable input-sources is empty. Changed to default to prevent a unusable GUI.");
     }
 
@@ -248,31 +300,55 @@ fn build_context(fb: Box<dyn Framebuffer>) -> Result<Context, Error> {
 
     let fonts = Fonts::load().context("can't load fonts")?;
 
-    let battery = Box::new(RemarkableBattery::new().context("can't create battery")?) as Box<dyn Battery>;
+    let battery =
+        Box::new(RemarkableBattery::new().context("can't create battery")?) as Box<dyn Battery>;
 
     let lightsensor = if CURRENT_DEVICE.has_lightsensor() {
-        Box::new(KoboLightSensor::new().context("can't create light sensor")?) as Box<dyn LightSensor>
+        Box::new(KoboLightSensor::new().context("can't create light sensor")?)
+            as Box<dyn LightSensor>
     } else {
         Box::new(0u16) as Box<dyn LightSensor>
     };
 
     let levels = settings.frontlight_levels;
     let frontlight = match CURRENT_DEVICE.frontlight_kind() {
-        FrontlightKind::Standard => Box::new(StandardFrontlight::new(levels.intensity)
-                                        .context("can't create standard frontlight")?) as Box<dyn Frontlight>,
-        FrontlightKind::Natural => Box::new(NaturalFrontlight::new(levels.intensity, levels.warmth)
-                                        .context("can't create natural frontlight")?) as Box<dyn Frontlight>,
-        FrontlightKind::Premixed => Box::new(PremixedFrontlight::new(levels.intensity, levels.warmth)
-                                        .context("can't create premixed frontlight")?) as Box<dyn Frontlight>,
-        FrontlightKind::Fake => Box::new(FakeFrontlight::new(levels.intensity)
-                                        .context("can't create fake frontlight")?) as Box<dyn Frontlight>,
+        FrontlightKind::Standard => Box::new(
+            StandardFrontlight::new(levels.intensity)
+                .context("can't create standard frontlight")?,
+        ) as Box<dyn Frontlight>,
+        FrontlightKind::Natural => Box::new(
+            NaturalFrontlight::new(levels.intensity, levels.warmth)
+                .context("can't create natural frontlight")?,
+        ) as Box<dyn Frontlight>,
+        FrontlightKind::Premixed => Box::new(
+            PremixedFrontlight::new(levels.intensity, levels.warmth)
+                .context("can't create premixed frontlight")?,
+        ) as Box<dyn Frontlight>,
+        FrontlightKind::Fake => {
+            Box::new(FakeFrontlight::new(levels.intensity).context("can't create fake frontlight")?)
+                as Box<dyn Frontlight>
+        }
     };
 
-    Ok(Context::new(fb, rtc, library, settings,
-                    fonts, battery, frontlight, lightsensor))
+    Ok(Context::new(
+        fb,
+        rtc,
+        library,
+        settings,
+        fonts,
+        battery,
+        frontlight,
+        lightsensor,
+    ))
 }
 
-fn schedule_task(id: TaskId, event: Event, delay: Duration, hub: &Sender<Event>, tasks: &mut Vec<Task>) {
+fn schedule_task(
+    id: TaskId,
+    event: Event,
+    delay: Duration,
+    hub: &Sender<Event>,
+    tasks: &mut Vec<Task>,
+) {
     let (ty, ry) = mpsc::channel();
     let hub2 = hub.clone();
     tasks.push(Task { id, chan: ry });
@@ -284,7 +360,14 @@ fn schedule_task(id: TaskId, event: Event, delay: Duration, hub: &Sender<Event>,
     });
 }
 
-fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<Event>, rq: &mut RenderQueue, context: &mut Context) {
+fn resume(
+    id: TaskId,
+    tasks: &mut Vec<Task>,
+    view: &mut dyn View,
+    hub: &Sender<Event>,
+    rq: &mut RenderQueue,
+    context: &mut Context,
+) {
     if id == TaskId::Suspend {
         tasks.retain(|task| task.id != TaskId::Suspend);
         if context.settings.frontlight {
@@ -293,9 +376,7 @@ fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<E
             context.frontlight.set_intensity(levels.intensity);
         }
         if context.settings.wifi {
-            Command::new("scripts/wifi-enable.sh")
-                    .status()
-                    .ok();
+            Command::new("scripts/wifi-enable.sh").status().ok();
         }
     }
     if id == TaskId::Suspend || id == TaskId::PrepareSuspend {
@@ -310,14 +391,31 @@ fn resume(id: TaskId, tasks: &mut Vec<Task>, view: &mut dyn View, hub: &Sender<E
     }
 }
 
-fn power_off(view: &mut dyn View, history: &mut Vec<HistoryItem>, updating: &mut FxHashMap<u32, Rectangle>, context: &mut Context) {
+fn power_off(
+    view: &mut dyn View,
+    history: &mut Vec<HistoryItem>,
+    updating: &mut Vec<UpdateData>,
+    context: &mut Context,
+) {
     let (tx, _rx) = mpsc::channel();
-    view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), context);
+    view.handle_event(
+        &Event::Back,
+        &tx,
+        &mut VecDeque::new(),
+        &mut RenderQueue::new(),
+        context,
+    );
     while let Some(mut item) = history.pop() {
-        item.view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), context);
+        item.view.handle_event(
+            &Event::Back,
+            &tx,
+            &mut VecDeque::new(),
+            &mut RenderQueue::new(),
+            context,
+        );
     }
     let interm = Intermission::new(context.fb.rect(), IntermKind::PowerOff, context);
-    updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+    wait_for_all(updating, context);
     interm.render(context.fb.as_mut(), *interm.rect(), &mut context.fonts);
     context.fb.update(interm.rect(), UpdateMode::Full).ok();
 }
@@ -328,13 +426,9 @@ fn set_wifi(enable: bool, context: &mut Context) {
     }
     context.settings.wifi = enable;
     if context.settings.wifi {
-        Command::new("scripts/wifi-enable.sh")
-                .status()
-                .ok();
+        Command::new("scripts/wifi-enable.sh").status().ok();
     } else {
-        Command::new("scripts/wifi-disable.sh")
-                .status()
-                .ok();
+        Command::new("scripts/wifi-disable.sh").status().ok();
         context.online = false;
     }
 }
@@ -349,34 +443,48 @@ enum ExitStatus {
 pub fn run() -> Result<(), Error> {
     let mut inactive_since = Instant::now();
     let mut exit_status = ExitStatus::Quit;
-    let mut fb = RemarkableFramebuffer::new(FB_DEVICE).context("can't create framebuffer.")?;
+    let mut fb = Box::new(RemarkableFramebuffer::new(FB_DEVICE).context("can't create framebuffer.")?);
     let initial_rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
     let startup_rotation = CURRENT_DEVICE.startup_rotation();
     if !CURRENT_DEVICE.has_gyroscope() && initial_rotation != startup_rotation {
         fb.set_rotation(startup_rotation).ok();
     }
 
-    let mut context = build_context(Box::new(fb)).context("can't build context")?;
+    let mut context = build_context(fb).context("can't build context")?;
     if context.settings.import.startup_trigger {
         context.batch_import();
     }
     context.load_dictionaries();
     context.load_keyboard_layouts();
-    context.fb.set_refresh_quality(context.settings.remarkable.refresh_quality);
+    context
+        .fb
+        .set_refresh_quality(context.settings.remarkable.refresh_quality);
 
-    let paths = vec![EVENT_BUTTONS.to_string(), EVENT_TOUCH_SCREEN.to_string(), EVENT_WACOM.to_string()];
+    let paths = vec![
+        EVENT_BUTTONS.to_string(),
+        EVENT_TOUCH_SCREEN.to_string(),
+        EVENT_WACOM.to_string(),
+    ];
     let (filter_input_cmd_sender, filter_input_cmd_receiver) = mpsc::channel();
     for source in InputSource::to_vec() {
-        if ! context.settings.remarkable.input_sources.contains(&source) {
-            filter_input_cmd_sender.send(InputFilterCommand {
-                path: source.to_path().to_owned(),
-                filtered: true,
-            }).unwrap();
+        if !context.settings.remarkable.input_sources.contains(&source) {
+            filter_input_cmd_sender
+                .send(InputFilterCommand {
+                    path: source.to_path().to_owned(),
+                    filtered: true,
+                })
+                .unwrap();
         }
     }
     let (ignored_bc_tx, ignored_bc_rx) = std::sync::mpsc::channel::<Vec<ButtonCode>>();
     let (raw_sender, raw_receiver) = raw_events(paths, filter_input_cmd_receiver);
-    let touch_screen = gesture_events(device_events(raw_receiver, context.display, context.settings.button_scheme, context.settings.remarkable.ignored_buttons.clone(), ignored_bc_rx));
+    let touch_screen = gesture_events(device_events(
+        raw_receiver,
+        context.display,
+        context.settings.button_scheme,
+        context.settings.remarkable.ignored_buttons.clone(),
+        ignored_bc_rx,
+    ));
     let usb_port = usb_events();
 
     let (tx, rx) = mpsc::channel();
@@ -396,30 +504,26 @@ pub fn run() -> Result<(), Error> {
     });
 
     let tx4 = tx.clone();
-    thread::spawn(move || {
-        loop {
-            thread::sleep(CLOCK_REFRESH_INTERVAL);
-            tx4.send(Event::ClockTick).ok();
-        }
+    thread::spawn(move || loop {
+        thread::sleep(CLOCK_REFRESH_INTERVAL);
+        tx4.send(Event::ClockTick).ok();
     });
 
     let tx5 = tx.clone();
-    thread::spawn(move || {
-        loop {
-            thread::sleep(BATTERY_REFRESH_INTERVAL);
-            tx5.send(Event::BatteryTick).ok();
-        }
+    thread::spawn(move || loop {
+        thread::sleep(BATTERY_REFRESH_INTERVAL);
+        tx5.send(Event::BatteryTick).ok();
     });
 
     if context.settings.auto_suspend > 0 {
         let tx6 = tx.clone();
-        thread::spawn(move || {
-            loop {
-                thread::sleep(AUTO_SUSPEND_REFRESH_INTERVAL);
-                tx6.send(Event::MightSuspend).ok();
-            }
+        thread::spawn(move || loop {
+            thread::sleep(AUTO_SUSPEND_REFRESH_INTERVAL);
+            tx6.send(Event::MightSuspend).ok();
         });
     }
+
+    context.fb.set_inverted(context.settings.inverted);
 
     if context.settings.wifi {
         Command::new("scripts/wifi-enable.sh").status().ok();
@@ -439,26 +543,45 @@ pub fn run() -> Result<(), Error> {
     let mut tasks: Vec<Task> = Vec::new();
     let mut history: Vec<HistoryItem> = Vec::new();
     let mut rq = RenderQueue::new();
-    let mut view: Box<dyn View> = Box::new(Home::new(context.fb.rect(), &tx,
-                                                     &mut rq, &mut context)?);
+    let mut view: Box<dyn View> =
+        Box::new(Home::new(context.fb.rect(), &tx, &mut rq, &mut context)?);
 
-    let mut updating = FxHashMap::default();
+    let mut updating = Vec::new();
     let current_dir = env::current_dir()?;
 
-    println!("{} is running on a Kobo {}.", APP_NAME,
-                                            CURRENT_DEVICE.model);
-    println!("The framebuffer resolution is {} by {}.", context.fb.rect().width(),
-                                                        context.fb.rect().height());
+    println!(
+        "{} is running on a Kobo {}.",
+        APP_NAME, CURRENT_DEVICE.model
+    );
+    println!(
+        "The framebuffer resolution is {} by {}.",
+        context.fb.rect().width(),
+        context.fb.rect().height()
+    );
 
     let mut bus = VecDeque::with_capacity(4);
 
-    schedule_task(TaskId::CheckBattery, Event::CheckBattery,
-                  BATTERY_REFRESH_INTERVAL, &tx, &mut tasks);
+    schedule_task(
+        TaskId::CheckBattery,
+        Event::CheckBattery,
+        BATTERY_REFRESH_INTERVAL,
+        &tx,
+        &mut tasks,
+    );
     tx.send(Event::WakeUp).ok();
 
-    if let Ok(status) = Command::new("systemctl").arg("is-active").arg("xochitl.service").stdout(std::process::Stdio::null()).status() {
+    if let Ok(status) = Command::new("systemctl")
+        .arg("is-active")
+        .arg("xochitl.service")
+        .stdout(std::process::Stdio::null())
+        .status()
+    {
         if status.code().unwrap() == 0 {
-            Command::new("systemctl").arg("stop").arg("xochitl").status().ok();
+            Command::new("systemctl")
+                .arg("stop")
+                .arg("xochitl")
+                .status()
+                .ok();
             context.killed_xochitl = true;
             println!("xochitl.service was active and stopped. You may only exit by starting Xochitl again.")
         }
@@ -466,221 +589,372 @@ pub fn run() -> Result<(), Error> {
 
     while let Ok(evt) = rx.recv() {
         match evt {
-            Event::Device(de) => {
-                match de {
-                    DeviceEvent::Button { code: ButtonCode::Power, status: ButtonStatus::Released, .. } => {
-                        if context.shared || context.covered {
-                            continue;
-                        }
+            Event::Device(de) => match de {
+                DeviceEvent::Button {
+                    code: ButtonCode::Power,
+                    status: ButtonStatus::Released,
+                    ..
+                } => {
+                    if context.shared || context.covered {
+                        continue;
+                    }
 
-                        if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                        } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                        } else {
-                            view.handle_event(&Event::Suspend, &tx, &mut bus, &mut rq, &mut context);
-                            let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                            rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
-                            schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
-                                          PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
-                            view.children_mut().push(Box::new(interm) as Box<dyn View>);
-                        }
-                    },
-                    DeviceEvent::Button { code: ButtonCode::Light, status: ButtonStatus::Pressed, .. } => {
-                        tx.send(Event::ToggleFrontlight).ok();
-                    },
-                    DeviceEvent::CoverOn => {
-                        context.covered = true;
-
-                        if !context.settings.sleep_cover || context.shared ||
-                           tasks.iter().any(|task| task.id == TaskId::PrepareSuspend ||
-                                                   task.id == TaskId::Suspend) {
-                            continue;
-                        }
-
+                    if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
+                        resume(
+                            TaskId::PrepareSuspend,
+                            &mut tasks,
+                            view.as_mut(),
+                            &tx,
+                            &mut rq,
+                            &mut context,
+                        );
+                    } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
+                        resume(
+                            TaskId::Suspend,
+                            &mut tasks,
+                            view.as_mut(),
+                            &tx,
+                            &mut rq,
+                            &mut context,
+                        );
+                    } else {
                         view.handle_event(&Event::Suspend, &tx, &mut bus, &mut rq, &mut context);
-                        let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                        rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
-                        schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
-                                      PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
+                        let interm =
+                            Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
+                        rq.add(RenderData::new(
+                            interm.id(),
+                            *interm.rect(),
+                            UpdateMode::Full,
+                        ));
+                        schedule_task(
+                            TaskId::PrepareSuspend,
+                            Event::PrepareSuspend,
+                            PREPARE_SUSPEND_WAIT_DELAY,
+                            &tx,
+                            &mut tasks,
+                        );
                         view.children_mut().push(Box::new(interm) as Box<dyn View>);
-                    },
-                    DeviceEvent::CoverOff => {
-                        context.covered = false;
+                    }
+                }
+                DeviceEvent::Button {
+                    code: ButtonCode::Light,
+                    status: ButtonStatus::Pressed,
+                    ..
+                } => {
+                    tx.send(Event::ToggleFrontlight).ok();
+                }
+                DeviceEvent::CoverOn => {
+                    context.covered = true;
 
-                        if context.shared {
-                            continue;
+                    if !context.settings.sleep_cover
+                        || context.shared
+                        || tasks.iter().any(|task| {
+                            task.id == TaskId::PrepareSuspend || task.id == TaskId::Suspend
+                        })
+                    {
+                        continue;
+                    }
+
+                    view.handle_event(&Event::Suspend, &tx, &mut bus, &mut rq, &mut context);
+                    let interm =
+                        Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
+                    rq.add(RenderData::new(
+                        interm.id(),
+                        *interm.rect(),
+                        UpdateMode::Full,
+                    ));
+                    schedule_task(
+                        TaskId::PrepareSuspend,
+                        Event::PrepareSuspend,
+                        PREPARE_SUSPEND_WAIT_DELAY,
+                        &tx,
+                        &mut tasks,
+                    );
+                    view.children_mut().push(Box::new(interm) as Box<dyn View>);
+                }
+                DeviceEvent::CoverOff => {
+                    context.covered = false;
+
+                    if context.shared {
+                        continue;
+                    }
+
+                    if !context.settings.sleep_cover {
+                        if tasks
+                            .iter()
+                            .any(|task| task.id == TaskId::Suspend && task.has_occurred())
+                        {
+                            tasks.retain(|task| task.id != TaskId::Suspend);
+                            schedule_task(
+                                TaskId::Suspend,
+                                Event::Suspend,
+                                SUSPEND_WAIT_DELAY,
+                                &tx,
+                                &mut tasks,
+                            );
                         }
+                        continue;
+                    }
 
-                        if !context.settings.sleep_cover {
-                            if tasks.iter().any(|task| task.id == TaskId::Suspend && task.has_occurred()) {
+                    if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
+                        resume(
+                            TaskId::PrepareSuspend,
+                            &mut tasks,
+                            view.as_mut(),
+                            &tx,
+                            &mut rq,
+                            &mut context,
+                        );
+                    } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
+                        resume(
+                            TaskId::Suspend,
+                            &mut tasks,
+                            view.as_mut(),
+                            &tx,
+                            &mut rq,
+                            &mut context,
+                        );
+                    }
+                }
+                DeviceEvent::NetUp => {
+                    if tasks
+                        .iter()
+                        .any(|task| task.id == TaskId::PrepareSuspend || task.id == TaskId::Suspend)
+                    {
+                        continue;
+                    }
+                    let ip = Command::new("scripts/ip.sh")
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+                        .unwrap_or_default();
+                    let essid = Command::new("scripts/essid.sh")
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+                        .unwrap_or_default();
+                    let notif = Notification::new(
+                        format!("Network is up ({}, {}).", ip, essid),
+                        &tx,
+                        &mut rq,
+                        &mut context,
+                    );
+                    context.online = true;
+                    view.children_mut().push(Box::new(notif) as Box<dyn View>);
+                    if view.is::<Home>() {
+                        view.handle_event(&evt, &tx, &mut bus, &mut rq, &mut context);
+                    } else if let Some(entry) =
+                        history.get_mut(0).filter(|entry| entry.view.is::<Home>())
+                    {
+                        let (tx, _rx) = mpsc::channel();
+                        entry.view.handle_event(
+                            &evt,
+                            &tx,
+                            &mut VecDeque::new(),
+                            &mut RenderQueue::new(),
+                            &mut context,
+                        );
+                    }
+                }
+                DeviceEvent::Plug(power_source) => {
+                    if context.plugged {
+                        continue;
+                    }
+
+                    context.plugged = true;
+
+                    tasks.retain(|task| task.id != TaskId::CheckBattery);
+
+                    if context.covered {
+                        continue;
+                    }
+
+                    match power_source {
+                        PowerSource::Wall => {
+                            if tasks
+                                .iter()
+                                .any(|task| task.id == TaskId::Suspend && task.has_occurred())
+                            {
                                 tasks.retain(|task| task.id != TaskId::Suspend);
-                                schedule_task(TaskId::Suspend, Event::Suspend,
-                                              SUSPEND_WAIT_DELAY, &tx, &mut tasks);
-                            }
-                            continue;
-                        }
-
-                        if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                            resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                        } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                            resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                        }
-                    },
-                    DeviceEvent::NetUp => {
-                        if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend ||
-                                                   task.id == TaskId::Suspend) {
-                            continue;
-                        }
-                        let ip = Command::new("scripts/ip.sh").output()
-                                         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-                                         .unwrap_or_default();
-                        let essid = Command::new("scripts/essid.sh").output()
-                                            .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
-                                            .unwrap_or_default();
-                        let notif = Notification::new(format!("Network is up ({}, {}).", ip, essid),
-                                                      &tx, &mut rq, &mut context);
-                        context.online = true;
-                        view.children_mut().push(Box::new(notif) as Box<dyn View>);
-                        if view.is::<Home>() {
-                            view.handle_event(&evt, &tx, &mut bus, &mut rq, &mut context);
-                        } else if let Some(entry) = history.get_mut(0).filter(|entry| entry.view.is::<Home>()) {
-                            let (tx, _rx) = mpsc::channel();
-                            entry.view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
-                        }
-                    },
-                    DeviceEvent::Plug(power_source) => {
-                        if context.plugged {
-                            continue;
-                        }
-
-                        context.plugged = true;
-
-                        tasks.retain(|task| task.id != TaskId::CheckBattery);
-
-                        if context.covered {
-                            continue;
-                        }
-
-                        match power_source {
-                            PowerSource::Wall => {
-                                if tasks.iter().any(|task| task.id == TaskId::Suspend && task.has_occurred()) {
-                                    tasks.retain(|task| task.id != TaskId::Suspend);
-                                    schedule_task(TaskId::Suspend, Event::Suspend,
-                                                  SUSPEND_WAIT_DELAY, &tx, &mut tasks);
-                                    continue;
-                                }
-                            },
-                            PowerSource::Host => {
-                                if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
-                                    resume(TaskId::PrepareSuspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                                } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
-                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                                }
-
-                                if context.settings.auto_share {
-                                    tx.send(Event::PrepareShare).ok();
-                                } else {
-                                    let dialog = Dialog::new(ViewId::ShareDialog,
-                                                             Some(Event::PrepareShare),
-                                                             "Share storage via USB?".to_string(),
-                                                             &mut context);
-                                    rq.add(RenderData::new(dialog.id(), *dialog.rect(), UpdateMode::Gui));
-                                    view.children_mut().push(Box::new(dialog) as Box<dyn View>);
-                                }
-
-                                inactive_since = Instant::now();
-                            },
-                        }
-
-                        tx.send(Event::BatteryTick).ok();
-                    },
-                    DeviceEvent::Unplug(..) => {
-                        if !context.plugged {
-                            continue;
-                        }
-
-                        if context.shared {
-                            context.shared = false;
-                            Command::new("scripts/usb-disable.sh").status().ok();
-                            env::set_current_dir(&current_dir)
-                                .map_err(|e| eprintln!("Can't set current directory to {}: {:#}.", current_dir.display(), e))
-                                .ok();
-                            let path = Path::new(SETTINGS_PATH);
-                            if let Ok(settings) = load_toml::<Settings, _>(path)
-                                                            .map_err(|e| eprintln!("Can't load settings: {:#}.", e)) {
-                                context.settings = settings;
-                            }
-                            if context.settings.wifi {
-                                Command::new("scripts/wifi-enable.sh")
-                                        .status()
-                                        .ok();
-                            }
-                            if context.settings.frontlight {
-                                let levels = context.settings.frontlight_levels;
-                                context.frontlight.set_warmth(levels.warmth);
-                                context.frontlight.set_intensity(levels.intensity);
-                            }
-                            if let Some(index) = locate::<Intermission>(view.as_ref()) {
-                                let rect = *view.child(index).rect();
-                                view.children_mut().remove(index);
-                                rq.add(RenderData::expose(rect, UpdateMode::Full));
-                            }
-                            if Path::new(KOBO_UPDATE_BUNDLE).exists() {
-                                tx.send(Event::Select(EntryId::Reboot)).ok();
-                            }
-                            context.library.reload();
-                            if context.settings.import.unshare_trigger {
-                                context.batch_import();
-                            }
-                            view.handle_event(&Event::Reseed, &tx, &mut bus, &mut rq, &mut context);
-                        } else {
-                            context.plugged = false;
-                            schedule_task(TaskId::CheckBattery, Event::CheckBattery,
-                                          BATTERY_REFRESH_INTERVAL, &tx, &mut tasks);
-                            if tasks.iter().any(|task| task.id == TaskId::Suspend && task.has_occurred()) {
-                                if context.covered {
-                                    tasks.retain(|task| task.id != TaskId::Suspend);
-                                    schedule_task(TaskId::Suspend, Event::Suspend,
-                                                  SUSPEND_WAIT_DELAY, &tx, &mut tasks);
-                                } else {
-                                    resume(TaskId::Suspend, &mut tasks, view.as_mut(), &tx, &mut rq, &mut context);
-                                }
-                            } else {
-                                tx.send(Event::BatteryTick).ok();
-                            }
-                        }
-                    },
-                    DeviceEvent::RotateScreen(n) => {
-                        if context.shared || tasks.iter().any(|task| task.id == TaskId::PrepareSuspend ||
-                                                                     task.id == TaskId::Suspend) {
-                            continue;
-                        }
-
-                        if let Some(rotation_lock) = context.settings.rotation_lock {
-                            let orientation = CURRENT_DEVICE.orientation(n);
-                            if rotation_lock == RotationLock::Current ||
-                               (rotation_lock == RotationLock::Portrait && orientation == Orientation::Landscape) ||
-                               (rotation_lock == RotationLock::Landscape && orientation == Orientation::Portrait) {
+                                schedule_task(
+                                    TaskId::Suspend,
+                                    Event::Suspend,
+                                    SUSPEND_WAIT_DELAY,
+                                    &tx,
+                                    &mut tasks,
+                                );
                                 continue;
                             }
                         }
+                        PowerSource::Host => {
+                            if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend) {
+                                resume(
+                                    TaskId::PrepareSuspend,
+                                    &mut tasks,
+                                    view.as_mut(),
+                                    &tx,
+                                    &mut rq,
+                                    &mut context,
+                                );
+                            } else if tasks.iter().any(|task| task.id == TaskId::Suspend) {
+                                resume(
+                                    TaskId::Suspend,
+                                    &mut tasks,
+                                    view.as_mut(),
+                                    &tx,
+                                    &mut rq,
+                                    &mut context,
+                                );
+                            }
 
-                        tx.send(Event::Select(EntryId::Rotate(n))).ok();
-                    },
-                    DeviceEvent::UserActivity if context.settings.auto_suspend > 0 => {
-                        inactive_since = Instant::now();
-                    },
-                    _ => {
-                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
+                            if context.settings.auto_share {
+                                tx.send(Event::PrepareShare).ok();
+                            } else {
+                                let dialog = Dialog::new(
+                                    ViewId::ShareDialog,
+                                    Some(Event::PrepareShare),
+                                    "Share storage via USB?".to_string(),
+                                    &mut context,
+                                );
+                                rq.add(RenderData::new(
+                                    dialog.id(),
+                                    *dialog.rect(),
+                                    UpdateMode::Gui,
+                                ));
+                                view.children_mut().push(Box::new(dialog) as Box<dyn View>);
+                            }
+
+                            inactive_since = Instant::now();
+                        }
                     }
+
+                    tx.send(Event::BatteryTick).ok();
+                }
+                DeviceEvent::Unplug(..) => {
+                    if !context.plugged {
+                        continue;
+                    }
+
+                    if context.shared {
+                        context.shared = false;
+                        Command::new("scripts/usb-disable.sh").status().ok();
+                        env::set_current_dir(&current_dir)
+                            .map_err(|e| {
+                                eprintln!(
+                                    "Can't set current directory to {}: {:#}.",
+                                    current_dir.display(),
+                                    e
+                                )
+                            })
+                            .ok();
+                        let path = Path::new(SETTINGS_PATH);
+                        if let Ok(settings) = load_toml::<Settings, _>(path)
+                            .map_err(|e| eprintln!("Can't load settings: {:#}.", e))
+                        {
+                            context.settings = settings;
+                        }
+                        if context.settings.wifi {
+                            Command::new("scripts/wifi-enable.sh").status().ok();
+                        }
+                        if context.settings.frontlight {
+                            let levels = context.settings.frontlight_levels;
+                            context.frontlight.set_warmth(levels.warmth);
+                            context.frontlight.set_intensity(levels.intensity);
+                        }
+                        if let Some(index) = locate::<Intermission>(view.as_ref()) {
+                            let rect = *view.child(index).rect();
+                            view.children_mut().remove(index);
+                            rq.add(RenderData::expose(rect, UpdateMode::Full));
+                        }
+                        if Path::new(KOBO_UPDATE_BUNDLE).exists() {
+                            tx.send(Event::Select(EntryId::Reboot)).ok();
+                        }
+                        context.library.reload();
+                        if context.settings.import.unshare_trigger {
+                            context.batch_import();
+                        }
+                        view.handle_event(&Event::Reseed, &tx, &mut bus, &mut rq, &mut context);
+                    } else {
+                        context.plugged = false;
+                        schedule_task(
+                            TaskId::CheckBattery,
+                            Event::CheckBattery,
+                            BATTERY_REFRESH_INTERVAL,
+                            &tx,
+                            &mut tasks,
+                        );
+                        if tasks
+                            .iter()
+                            .any(|task| task.id == TaskId::Suspend && task.has_occurred())
+                        {
+                            if context.covered {
+                                tasks.retain(|task| task.id != TaskId::Suspend);
+                                schedule_task(
+                                    TaskId::Suspend,
+                                    Event::Suspend,
+                                    SUSPEND_WAIT_DELAY,
+                                    &tx,
+                                    &mut tasks,
+                                );
+                            } else {
+                                resume(
+                                    TaskId::Suspend,
+                                    &mut tasks,
+                                    view.as_mut(),
+                                    &tx,
+                                    &mut rq,
+                                    &mut context,
+                                );
+                            }
+                        } else {
+                            tx.send(Event::BatteryTick).ok();
+                        }
+                    }
+                }
+                DeviceEvent::RotateScreen(n) => {
+                    if context.shared
+                        || tasks.iter().any(|task| {
+                            task.id == TaskId::PrepareSuspend || task.id == TaskId::Suspend
+                        })
+                    {
+                        continue;
+                    }
+
+                    if view.is::<RotationValues>() {
+                        println!("Gyro rotation: {}", n);
+                    }
+
+                    if let Some(rotation_lock) = context.settings.rotation_lock {
+                        let orientation = CURRENT_DEVICE.orientation(n);
+                        if rotation_lock == RotationLock::Current
+                            || (rotation_lock == RotationLock::Portrait
+                                && orientation == Orientation::Landscape)
+                            || (rotation_lock == RotationLock::Landscape
+                                && orientation == Orientation::Portrait)
+                        {
+                            continue;
+                        }
+                    }
+
+                    tx.send(Event::Select(EntryId::Rotate(n))).ok();
+                }
+                DeviceEvent::UserActivity if context.settings.auto_suspend > 0 => {
+                    inactive_since = Instant::now();
+                }
+                _ => {
+                    handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
                 }
             },
             Event::CheckBattery => {
-                schedule_task(TaskId::CheckBattery, Event::CheckBattery,
-                              BATTERY_REFRESH_INTERVAL, &tx, &mut tasks);
-                if tasks.iter().any(|task| task.id == TaskId::PrepareSuspend ||
-                                           task.id == TaskId::Suspend) {
+                schedule_task(
+                    TaskId::CheckBattery,
+                    Event::CheckBattery,
+                    BATTERY_REFRESH_INTERVAL,
+                    &tx,
+                    &mut tasks,
+                );
+                if tasks
+                    .iter()
+                    .any(|task| task.id == TaskId::PrepareSuspend || task.id == TaskId::Suspend)
+                {
                     continue;
                 }
                 if let Ok(v) = context.battery.capacity() {
@@ -689,17 +963,23 @@ pub fn run() -> Result<(), Error> {
                         exit_status = ExitStatus::PowerOff;
                         break;
                     } else if v < context.settings.battery.warn {
-                        let notif = Notification::new("The battery capacity is getting low.".to_string(),
-                                                      &tx, &mut rq, &mut context);
+                        let notif = Notification::new(
+                            "The battery capacity is getting low.".to_string(),
+                            &tx,
+                            &mut rq,
+                            &mut context,
+                        );
                         view.children_mut().push(Box::new(notif) as Box<dyn View>);
                     }
                 }
-            },
+            }
             Event::PrepareSuspend => {
                 tasks.retain(|task| task.id != TaskId::PrepareSuspend);
-                updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                wait_for_all(&mut updating, &mut context);
                 let path = Path::new(SETTINGS_PATH);
-                save_toml(&context.settings, path).map_err(|e| eprintln!("Can't save settings: {:#}.", e)).ok();
+                save_toml(&context.settings, path)
+                    .map_err(|e| eprintln!("Can't save settings: {:#}.", e))
+                    .ok();
                 context.library.flush();
 
                 if context.settings.frontlight {
@@ -708,42 +988,45 @@ pub fn run() -> Result<(), Error> {
                     context.frontlight.set_warmth(0.0);
                 }
                 if context.settings.wifi {
-                    Command::new("scripts/wifi-disable.sh")
-                            .status()
-                            .ok();
+                    Command::new("scripts/wifi-disable.sh").status().ok();
                     context.online = false;
                 }
                 // https://github.com/koreader/koreader/commit/71afe36
-                schedule_task(TaskId::Suspend, Event::Suspend,
-                              SUSPEND_WAIT_DELAY, &tx, &mut tasks);
-            },
+                schedule_task(
+                    TaskId::Suspend,
+                    Event::Suspend,
+                    SUSPEND_WAIT_DELAY,
+                    &tx,
+                    &mut tasks,
+                );
+            }
             Event::Suspend => {
                 if context.settings.auto_power_off > 0 {
                     context.rtc.iter().for_each(|rtc| {
                         rtc.set_alarm(context.settings.auto_power_off)
-                           .map_err(|e| eprintln!("Can't set alarm: {:#}.", e))
-                           .ok();
+                            .map_err(|e| eprintln!("Can't set alarm: {:#}.", e))
+                            .ok();
                     });
                 }
-                println!("{}", Local::now().format("Went to sleep on %B %-d, %Y at %H:%M."));
-                Command::new("scripts/suspend.sh")
-                        .status()
-                        .ok();
+                println!(
+                    "{}",
+                    Local::now().format("Went to sleep on %B %-d, %Y at %H:%M.")
+                );
+                Command::new("scripts/suspend.sh").status().ok();
                 println!("{}", Local::now().format("Woke up on %B %-d, %Y at %H:%M."));
-                Command::new("scripts/resume.sh")
-                        .status()
-                        .ok();
+                Command::new("scripts/resume.sh").status().ok();
                 inactive_since = Instant::now();
                 if context.settings.auto_power_off > 0 {
-                    if let Some(enabled) = context.rtc.as_ref()
-                                                  .and_then(|rtc| rtc.is_alarm_enabled()
-                                                                     .map_err(|e| eprintln!("Can't get alarm: {:#}", e))
-                                                                     .ok()) {
+                    if let Some(enabled) = context.rtc.as_ref().and_then(|rtc| {
+                        rtc.is_alarm_enabled()
+                            .map_err(|e| eprintln!("Can't get alarm: {:#}", e))
+                            .ok()
+                    }) {
                         if enabled {
                             context.rtc.iter().for_each(|rtc| {
                                 rtc.disable_alarm()
-                                   .map_err(|e| eprintln!("Can't disable alarm: {:#}.", e))
-                                   .ok();
+                                    .map_err(|e| eprintln!("Can't disable alarm: {:#}.", e))
+                                    .ok();
                             });
                         } else {
                             power_off(view.as_mut(), &mut history, &mut updating, &mut context);
@@ -752,7 +1035,7 @@ pub fn run() -> Result<(), Error> {
                         }
                     }
                 }
-            },
+            }
             Event::PrepareShare => {
                 if context.shared {
                     continue;
@@ -761,9 +1044,10 @@ pub fn run() -> Result<(), Error> {
                 tasks.clear();
                 view.handle_event(&Event::Back, &tx, &mut bus, &mut rq, &mut context);
                 while let Some(mut item) = history.pop() {
-                    item.view.handle_event(&Event::Back, &tx, &mut bus, &mut rq, &mut context);
+                    item.view
+                        .handle_event(&Event::Back, &tx, &mut bus, &mut rq, &mut context);
                     if item.rotation != context.display.rotation {
-                        updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                        wait_for_all(&mut updating, &mut context);
                         if let Ok(dims) = context.fb.set_rotation(item.rotation) {
                             raw_sender.send(display_rotate_event(item.rotation)).ok();
                             context.display.rotation = item.rotation;
@@ -774,7 +1058,8 @@ pub fn run() -> Result<(), Error> {
                 }
                 let path = Path::new(SETTINGS_PATH);
                 save_toml(&context.settings, path)
-                         .map_err(|e| eprintln!("Can't save settings: {:#}.", e)).ok();
+                    .map_err(|e| eprintln!("Can't save settings: {:#}.", e))
+                    .ok();
                 context.library.flush();
 
                 if context.settings.frontlight {
@@ -783,17 +1068,19 @@ pub fn run() -> Result<(), Error> {
                     context.frontlight.set_warmth(0.0);
                 }
                 if context.settings.wifi {
-                    Command::new("scripts/wifi-disable.sh")
-                            .status()
-                            .ok();
+                    Command::new("scripts/wifi-disable.sh").status().ok();
                     context.online = false;
                 }
 
                 let interm = Intermission::new(context.fb.rect(), IntermKind::Share, &context);
-                rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
+                rq.add(RenderData::new(
+                    interm.id(),
+                    *interm.rect(),
+                    UpdateMode::Full,
+                ));
                 view.children_mut().push(Box::new(interm) as Box<dyn View>);
                 tx.send(Event::Share).ok();
-            },
+            }
             Event::Share => {
                 if context.shared {
                     continue;
@@ -801,51 +1088,71 @@ pub fn run() -> Result<(), Error> {
 
                 context.shared = true;
                 Command::new("scripts/usb-enable.sh").status().ok();
-            },
-            Event::Gesture(ge) => {
-                match ge {
-                    GestureEvent::HoldButtonLong(ButtonCode::Power) => {
-                        power_off(view.as_mut(), &mut history, &mut updating, &mut context);
-                        exit_status = ExitStatus::PowerOff;
-                        break;
-                    },
-                    GestureEvent::MultiTap(mut points) => {
-                        if points[0].x > points[1].x {
-                            points.swap(0, 1);
+            }
+            Event::Gesture(ge) => match ge {
+                GestureEvent::HoldButtonLong(ButtonCode::Power) => {
+                    power_off(view.as_mut(), &mut history, &mut updating, &mut context);
+                    exit_status = ExitStatus::PowerOff;
+                    break;
+                }
+                GestureEvent::MultiTap(mut points) => {
+                    if points[0].x > points[1].x {
+                        points.swap(0, 1);
+                    }
+                    let rect = context.fb.rect();
+                    let r1 = Region::from_point(
+                        points[0],
+                        rect,
+                        context.settings.reader.strip_width,
+                        context.settings.reader.corner_width,
+                    );
+                    let r2 = Region::from_point(
+                        points[1],
+                        rect,
+                        context.settings.reader.strip_width,
+                        context.settings.reader.corner_width,
+                    );
+                    match (r1, r2) {
+                        (
+                            Region::Corner(DiagDir::SouthWest),
+                            Region::Corner(DiagDir::NorthEast),
+                        ) => {
+                            rq.add(RenderData::new(
+                                view.id(),
+                                context.fb.rect(),
+                                UpdateMode::Full,
+                            ));
                         }
-                        let rect = context.fb.rect();
-                        let r1 = Region::from_point(points[0], rect,
-                                                    context.settings.reader.strip_width,
-                                                    context.settings.reader.corner_width);
-                        let r2 = Region::from_point(points[1], rect,
-                                                    context.settings.reader.strip_width,
-                                                    context.settings.reader.corner_width);
-                        match (r1, r2) {
-                            (Region::Corner(DiagDir::SouthWest), Region::Corner(DiagDir::NorthEast)) => {
-                                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Full));
-                            },
-                            (Region::Corner(DiagDir::NorthWest), Region::Corner(DiagDir::SouthEast)) => {
-                                tx.send(Event::Select(EntryId::TakeScreenshot)).ok();
-                            },
-                            _ => (),
+                        (
+                            Region::Corner(DiagDir::NorthWest),
+                            Region::Corner(DiagDir::SouthEast),
+                        ) => {
+                            tx.send(Event::Select(EntryId::TakeScreenshot)).ok();
                         }
-                    },
-                    _ => {
-                        handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
-                    },
+                        _ => (),
+                    }
+                }
+                _ => {
+                    handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
                 }
             },
             Event::ToggleFrontlight => {
                 context.set_frontlight(!context.settings.frontlight);
-                view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut rq, &mut context);
-            },
+                view.handle_event(
+                    &Event::ToggleFrontlight,
+                    &tx,
+                    &mut bus,
+                    &mut rq,
+                    &mut context,
+                );
+            }
             Event::Open(info) => {
                 let rotation = context.display.rotation;
                 let dithered = context.fb.dithered();
                 if let Some(reader_info) = info.reader.as_ref() {
                     /*if let Some(n) = reader_info.rotation.map(|n| CURRENT_DEVICE.from_canonical(n)) {
                         if CURRENT_DEVICE.orientation(n) != CURRENT_DEVICE.orientation(rotation) {
-                            updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                            wait_for_all(&mut updating, &mut context);
                             if let Ok(dims) = context.fb.set_rotation(n) {
                                 raw_sender.send(display_rotate_event(n)).ok();
                                 context.display.rotation = n;
@@ -855,12 +1162,23 @@ pub fn run() -> Result<(), Error> {
                     }*/
                     context.fb.set_dithered(reader_info.dithered);
                 } else {
-                    context.fb.set_dithered(context.settings.reader.dithered_kinds.contains(&info.file.kind));
+                    context.fb.set_dithered(
+                        context
+                            .settings
+                            .reader
+                            .dithered_kinds
+                            .contains(&info.file.kind),
+                    );
                 }
                 let path = info.file.path.clone();
                 if let Some(r) = Reader::new(context.fb.rect(), *info, &tx, &mut context) {
                     let mut next_view = Box::new(r) as Box<dyn View>;
-                    transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
+                    transfer_notifications(
+                        view.as_mut(),
+                        next_view.as_mut(),
+                        &mut rq,
+                        &mut context,
+                    );
                     history.push(HistoryItem {
                         view,
                         rotation,
@@ -877,17 +1195,30 @@ pub fn run() -> Result<(), Error> {
                         }
                     }
                     context.fb.set_dithered(dithered);
-                    handle_event(view.as_mut(), &Event::Invalid(path), &tx, &mut bus, &mut rq, &mut context);
+                    handle_event(
+                        view.as_mut(),
+                        &Event::Invalid(path),
+                        &tx,
+                        &mut bus,
+                        &mut rq,
+                        &mut context,
+                    );
                 }
-            },
+            }
             Event::Select(EntryId::About) => {
-                let dialog = Dialog::new(ViewId::AboutDialog,
-                                         None,
-                                         format!("Plato {}", env!("CARGO_PKG_VERSION")),
-                                         &mut context);
-                rq.add(RenderData::new(dialog.id(), *dialog.rect(), UpdateMode::Gui));
+                let dialog = Dialog::new(
+                    ViewId::AboutDialog,
+                    None,
+                    format!("Plato {}", env!("CARGO_PKG_VERSION")),
+                    &mut context,
+                );
+                rq.add(RenderData::new(
+                    dialog.id(),
+                    *dialog.rect(),
+                    UpdateMode::Gui,
+                ));
                 view.children_mut().push(Box::new(dialog) as Box<dyn View>);
-            },
+            }
             Event::Select(EntryId::SystemInfo) => {
                 view.children_mut().retain(|child| !child.is::<Menu>());
                 let html = sys_info_as_html();
@@ -901,10 +1232,16 @@ pub fn run() -> Result<(), Error> {
                     dithered: context.fb.dithered(),
                 });
                 view = next_view;
-            },
+            }
             Event::OpenHtml(ref html, ref link_uri) => {
                 view.children_mut().retain(|child| !child.is::<Menu>());
-                let r = Reader::from_html(context.fb.rect(), html, link_uri.as_deref(), &tx, &mut context);
+                let r = Reader::from_html(
+                    context.fb.rect(),
+                    html,
+                    link_uri.as_deref(),
+                    &tx,
+                    &mut context,
+                );
                 let mut next_view = Box::new(r) as Box<dyn View>;
                 transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
                 history.push(HistoryItem {
@@ -914,7 +1251,7 @@ pub fn run() -> Result<(), Error> {
                     dithered: context.fb.dithered(),
                 });
                 view = next_view;
-            },
+            }
             Event::Select(EntryId::Launch(app_cmd)) => {
                 view.children_mut().retain(|child| !child.is::<Menu>());
                 let monochrome = context.fb.monochrome();
@@ -922,16 +1259,32 @@ pub fn run() -> Result<(), Error> {
                     AppCmd::Sketch => {
                         context.fb.set_monochrome(true);
                         Box::new(Sketch::new(context.fb.rect(), &mut rq, &mut context))
-                    },
-                    AppCmd::Calculator => Box::new(Calculator::new(context.fb.rect(), &tx, &mut rq, &mut context)?),
-                    AppCmd::Dictionary { ref query, ref language } => Box::new(DictionaryApp::new(context.fb.rect(), query,
-                                                                                                  language, &tx, &mut rq, &mut context)),
+                    }
+                    AppCmd::Calculator => Box::new(Calculator::new(
+                        context.fb.rect(),
+                        &tx,
+                        &mut rq,
+                        &mut context,
+                    )?),
+                    AppCmd::Dictionary {
+                        ref query,
+                        ref language,
+                    } => Box::new(DictionaryApp::new(
+                        context.fb.rect(),
+                        query,
+                        language,
+                        &tx,
+                        &mut rq,
+                        &mut context,
+                    )),
                     AppCmd::TouchEvents => {
                         Box::new(TouchEvents::new(context.fb.rect(), &mut rq, &mut context))
-                    },
-                    AppCmd::RotationValues => {
-                        Box::new(RotationValues::new(context.fb.rect(), &mut rq, &mut context))
-                    },
+                    }
+                    AppCmd::RotationValues => Box::new(RotationValues::new(
+                        context.fb.rect(),
+                        &mut rq,
+                        &mut context,
+                    )),
                 };
                 transfer_notifications(view.as_mut(), next_view.as_mut(), &mut rq, &mut context);
                 history.push(HistoryItem {
@@ -941,7 +1294,7 @@ pub fn run() -> Result<(), Error> {
                     dithered: context.fb.dithered(),
                 });
                 view = next_view;
-            },
+            }
             Event::Back => {
                 if let Some(item) = history.pop() {
                     view = item.view;
@@ -951,8 +1304,10 @@ pub fn run() -> Result<(), Error> {
                     if item.dithered != context.fb.dithered() {
                         context.fb.set_dithered(item.dithered);
                     }
-                    if CURRENT_DEVICE.orientation(item.rotation) != CURRENT_DEVICE.orientation(context.display.rotation) {
-                        updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                    if CURRENT_DEVICE.orientation(item.rotation)
+                        != CURRENT_DEVICE.orientation(context.display.rotation)
+                    {
+                        wait_for_all(&mut updating, &mut context);
                         if let Ok(dims) = context.fb.set_rotation(item.rotation) {
                             raw_sender.send(display_rotate_event(item.rotation)).ok();
                             context.display.rotation = item.rotation;
@@ -963,63 +1318,93 @@ pub fn run() -> Result<(), Error> {
                 } else if !view.is::<Home>() {
                     break;
                 }
-            },
+            }
             Event::TogglePresetMenu(rect, index) => {
                 if let Some(index) = locate_by_id(view.as_ref(), ViewId::PresetMenu) {
                     let rect = *view.child(index).rect();
                     view.children_mut().remove(index);
                     rq.add(RenderData::expose(rect, UpdateMode::Gui));
                 } else {
-                    let preset_menu = Menu::new(rect, ViewId::PresetMenu, MenuKind::Contextual,
-                                                vec![EntryKind::Command("Remove".to_string(),
-                                                                        EntryId::RemovePreset(index))],
-                                                &mut context);
-                    rq.add(RenderData::new(preset_menu.id(), *preset_menu.rect(), UpdateMode::Gui));
-                    view.children_mut().push(Box::new(preset_menu) as Box<dyn View>);
+                    let preset_menu = Menu::new(
+                        rect,
+                        ViewId::PresetMenu,
+                        MenuKind::Contextual,
+                        vec![EntryKind::Command(
+                            "Remove".to_string(),
+                            EntryId::RemovePreset(index),
+                        )],
+                        &mut context,
+                    );
+                    rq.add(RenderData::new(
+                        preset_menu.id(),
+                        *preset_menu.rect(),
+                        UpdateMode::Gui,
+                    ));
+                    view.children_mut()
+                        .push(Box::new(preset_menu) as Box<dyn View>);
                 }
-            },
+            }
             Event::Show(ViewId::Frontlight) => {
                 if !context.settings.frontlight {
                     context.set_frontlight(true);
-                    view.handle_event(&Event::ToggleFrontlight, &tx, &mut bus, &mut rq, &mut context);
+                    view.handle_event(
+                        &Event::ToggleFrontlight,
+                        &tx,
+                        &mut bus,
+                        &mut rq,
+                        &mut context,
+                    );
                 }
                 let flw = FrontlightWindow::new(&mut context);
                 rq.add(RenderData::new(flw.id(), *flw.rect(), UpdateMode::Gui));
                 view.children_mut().push(Box::new(flw) as Box<dyn View>);
-            },
+            }
             Event::ToggleInputHistoryMenu(id, rect) => {
                 toggle_input_history_menu(view.as_mut(), id, rect, None, &mut rq, &mut context);
-            },
+            }
             Event::ToggleNear(ViewId::KeyboardLayoutMenu, rect) => {
                 toggle_keyboard_layout_menu(view.as_mut(), rect, None, &mut rq, &mut context);
-            },
+            }
             Event::Close(ViewId::Frontlight) => {
                 if let Some(index) = locate::<FrontlightWindow>(view.as_ref()) {
                     let rect = *view.child(index).rect();
                     view.children_mut().remove(index);
                     rq.add(RenderData::expose(rect, UpdateMode::Gui));
                 }
-            },
+            }
             Event::Close(id) => {
                 if let Some(index) = locate_by_id(view.as_ref(), id) {
                     let rect = overlapping_rectangle(view.child(index));
                     rq.add(RenderData::expose(rect, UpdateMode::Gui));
                     view.children_mut().remove(index);
                 }
-            },
+            }
             Event::Select(EntryId::ToggleInverted) => {
                 context.fb.toggle_inverted();
-                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
-            },
+                context.settings.inverted = context.fb.inverted();
+                rq.add(RenderData::new(
+                    view.id(),
+                    context.fb.rect(),
+                    UpdateMode::Full,
+                ));
+            }
             Event::Select(EntryId::ToggleDithered) => {
                 context.fb.toggle_dithered();
-                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Full));
-            },
+                rq.add(RenderData::new(
+                    view.id(),
+                    context.fb.rect(),
+                    UpdateMode::Full,
+                ));
+            }
             Event::Select(EntryId::RefreshQuality(quality)) => {
                 context.fb.set_refresh_quality(quality);
                 context.settings.remarkable.refresh_quality = quality;
-                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
-            },
+                rq.add(RenderData::new(
+                    view.id(),
+                    context.fb.rect(),
+                    UpdateMode::Gui,
+                ));
+            }
             Event::Select(EntryId::ToggleInputSource(source)) => {
                 if context.settings.remarkable.input_sources.contains(&source) {
                     // Remove source
@@ -1028,53 +1413,79 @@ pub fn run() -> Result<(), Error> {
                         // This should not be allowed!
                         let other_source = match source {
                             InputSource::Pen => InputSource::Touch,
-                            InputSource::Touch => InputSource::Pen
+                            InputSource::Touch => InputSource::Pen,
                         };
                         context.settings.remarkable.input_sources.push(other_source);
-                        
+
                         // Open file
-                        filter_input_cmd_sender.send(InputFilterCommand {
-                            path: other_source.to_path().to_owned(),
-                            filtered: false,
-                        }).unwrap();
+                        filter_input_cmd_sender
+                            .send(InputFilterCommand {
+                                path: other_source.to_path().to_owned(),
+                                filtered: false,
+                            })
+                            .unwrap();
                         // Notify
                         let msg = format!("Automatically enabled input by {}", other_source);
                         let notif = Notification::new(msg, &tx, &mut rq, &mut context);
                         view.children_mut().push(Box::new(notif) as Box<dyn View>);
                     }
-                    let source_index = context.settings.remarkable.input_sources.iter().position(|&e| e == source).unwrap();
-                    context.settings.remarkable.input_sources.remove(source_index);
+                    let source_index = context
+                        .settings
+                        .remarkable
+                        .input_sources
+                        .iter()
+                        .position(|&e| e == source)
+                        .unwrap();
+                    context
+                        .settings
+                        .remarkable
+                        .input_sources
+                        .remove(source_index);
 
                     // Close file
-                    filter_input_cmd_sender.send(InputFilterCommand {
-                        path: source.to_path().to_owned(),
-                        filtered: true,
-                    }).unwrap();
-                }else {
+                    filter_input_cmd_sender
+                        .send(InputFilterCommand {
+                            path: source.to_path().to_owned(),
+                            filtered: true,
+                        })
+                        .unwrap();
+                } else {
                     // Add source
                     context.settings.remarkable.input_sources.push(source);
                     // Open file
-                    filter_input_cmd_sender.send(InputFilterCommand {
-                        path: source.to_path().to_owned(),
-                        filtered: false,
-                    }).unwrap();
+                    filter_input_cmd_sender
+                        .send(InputFilterCommand {
+                            path: source.to_path().to_owned(),
+                            filtered: false,
+                        })
+                        .unwrap();
                 }
 
-                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
-            },
+                rq.add(RenderData::new(
+                    view.id(),
+                    context.fb.rect(),
+                    UpdateMode::Gui,
+                ));
+            }
             Event::Select(EntryId::ToggleIgnoreButtonCode(code)) => {
                 let ignored_buttons = &mut context.settings.remarkable.ignored_buttons;
                 if ignored_buttons.contains(&code) {
                     let code_index = ignored_buttons.iter().position(|&e| e == code).unwrap();
                     ignored_buttons.remove(code_index);
-                }else {
+                } else {
                     ignored_buttons.push(code);
                 }
                 ignored_bc_tx.send(ignored_buttons.clone()).unwrap();
-                rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Gui));
-            },
-            Event::Select(EntryId::Rotate(n)) if n != context.display.rotation && view.might_rotate() => {
-                updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                rq.add(RenderData::new(
+                    view.id(),
+                    context.fb.rect(),
+                    UpdateMode::Gui,
+                ));
+            }
+            Event::Select(EntryId::Rotate(n))
+                if n != context.display.rotation && view.might_rotate() =>
+            {
+                wait_for_all(&mut updating, &mut context);
                 if let Ok(dims) = context.fb.set_rotation(n) {
                     raw_sender.send(display_rotate_event(n)).ok();
                     context.display.rotation = n;
@@ -1083,14 +1494,17 @@ pub fn run() -> Result<(), Error> {
                         context.display.dims = dims;
                         view.resize(fb_rect, &tx, &mut rq, &mut context);
                     } else {
-                        rq.add(RenderData::new(view.id(), context.fb.rect(), UpdateMode::Full));
+                        rq.add(RenderData::new(
+                            view.id(),
+                            context.fb.rect(),
+                            UpdateMode::Full,
+                        ));
                     }
                 }
-            },
+            }
             Event::Select(EntryId::SetRotationLock(rotation_lock)) => {
                 context.settings.rotation_lock = rotation_lock;
-
-            },
+            }
             Event::Select(EntryId::SetButtonScheme(button_scheme)) => {
                 context.settings.button_scheme = button_scheme;
 
@@ -1098,18 +1512,18 @@ pub fn run() -> Result<(), Error> {
                 match button_scheme {
                     ButtonScheme::Natural => {
                         raw_sender.send(button_scheme_event(VAL_RELEASE)).ok();
-                    },
+                    }
                     ButtonScheme::Inverted => {
                         raw_sender.send(button_scheme_event(VAL_PRESS)).ok();
                     }
                 }
-            },
+            }
             Event::SetWifi(enable) => {
                 set_wifi(enable, &mut context);
-            },
+            }
             Event::Select(EntryId::ToggleWifi) => {
                 set_wifi(!context.settings.wifi, &mut context);
-            },
+            }
             Event::Select(EntryId::TakeScreenshot) => {
                 let name = Local::now().format("screenshot-%Y%m%d_%H%M%S.png");
                 let msg = match context.fb.save(&name.to_string()) {
@@ -1118,61 +1532,84 @@ pub fn run() -> Result<(), Error> {
                 };
                 let notif = Notification::new(msg, &tx, &mut rq, &mut context);
                 view.children_mut().push(Box::new(notif) as Box<dyn View>);
-            },
-            Event::CheckFetcher(..) |
-            Event::FetcherAddDocument(..) |
-            Event::FetcherRemoveDocument(..) |
-            Event::FetcherSearch { .. } if !view.is::<Home>() => {
+            }
+            Event::CheckFetcher(..)
+            | Event::FetcherAddDocument(..)
+            | Event::FetcherRemoveDocument(..)
+            | Event::FetcherSearch { .. }
+                if !view.is::<Home>() =>
+            {
                 if let Some(entry) = history.get_mut(0).filter(|entry| entry.view.is::<Home>()) {
                     let (tx, _rx) = mpsc::channel();
-                    entry.view.handle_event(&evt, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
+                    entry.view.handle_event(
+                        &evt,
+                        &tx,
+                        &mut VecDeque::new(),
+                        &mut RenderQueue::new(),
+                        &mut context,
+                    );
                 }
-            },
+            }
             Event::Notify(msg) => {
                 let notif = Notification::new(msg, &tx, &mut rq, &mut context);
                 view.children_mut().push(Box::new(notif) as Box<dyn View>);
-            },
+            }
             Event::Select(EntryId::Reboot) => {
                 exit_status = ExitStatus::Reboot;
                 break;
-            },
+            }
             Event::Select(EntryId::PowerOff) => {
                 exit_status = ExitStatus::PowerOff;
                 break;
-            },
+            }
             Event::Select(EntryId::Quit) => {
                 break;
-            },
+            }
             Event::Select(EntryId::QuitToXochitl) => {
                 exit_status = ExitStatus::QuitToXochitl;
                 break;
-            },
+            }
             Event::Select(EntryId::RebootInNickel) => {
-                fs::remove_file("bootlock").map_err(|e| {
-                    eprintln!("Couldn't remove the bootlock file: {:#}.", e);
-                }).ok();
+                fs::remove_file("bootlock")
+                    .map_err(|e| {
+                        eprintln!("Couldn't remove the bootlock file: {:#}.", e);
+                    })
+                    .ok();
                 exit_status = ExitStatus::Reboot;
                 break;
-            },
+            }
             Event::MightSuspend if context.settings.auto_suspend > 0 => {
-                if context.shared || tasks.iter().any(|task| task.id == TaskId::PrepareSuspend ||
-                                                             task.id == TaskId::Suspend) {
+                if context.shared
+                    || tasks
+                        .iter()
+                        .any(|task| task.id == TaskId::PrepareSuspend || task.id == TaskId::Suspend)
+                {
                     inactive_since = Instant::now();
                     continue;
                 }
                 let seconds = 60 * context.settings.auto_suspend as u64;
                 if inactive_since.elapsed() > Duration::from_secs(seconds) {
                     view.handle_event(&Event::Suspend, &tx, &mut bus, &mut rq, &mut context);
-                    let interm = Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
-                    rq.add(RenderData::new(interm.id(), *interm.rect(), UpdateMode::Full));
-                    schedule_task(TaskId::PrepareSuspend, Event::PrepareSuspend,
-                                  PREPARE_SUSPEND_WAIT_DELAY, &tx, &mut tasks);
+                    let interm =
+                        Intermission::new(context.fb.rect(), IntermKind::Suspend, &context);
+                    rq.add(RenderData::new(
+                        interm.id(),
+                        *interm.rect(),
+                        UpdateMode::Full,
+                    ));
+                    schedule_task(
+                        TaskId::PrepareSuspend,
+                        Event::PrepareSuspend,
+                        PREPARE_SUSPEND_WAIT_DELAY,
+                        &tx,
+                        &mut tasks,
+                    );
                     view.children_mut().push(Box::new(interm) as Box<dyn View>);
                 }
-            },
+            }
             _ => {
                 handle_event(view.as_mut(), &evt, &tx, &mut bus, &mut rq, &mut context);
-            },
+            }
         }
 
         process_render_queue(view.as_ref(), &mut rq, &mut context, &mut updating);
@@ -1201,15 +1638,19 @@ pub fn run() -> Result<(), Error> {
         ExitStatus::Reboot => {
             Command::new("sync").status().ok();
             Command::new("/sbin/reboot").status().ok();
-        },
+        }
         ExitStatus::PowerOff => {
             Command::new("sync").status().ok();
             Command::new("/sbin/poweroff").status().unwrap();
-        },
+        }
         ExitStatus::QuitToXochitl => {
             Command::new("sync").status().ok();
-            Command::new("systemctl").arg("start").arg("xochitl").status().ok();
-        },
+            Command::new("systemctl")
+                .arg("start")
+                .arg("xochitl")
+                .status()
+                .ok();
+        }
         _ => (),
     }
 

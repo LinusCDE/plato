@@ -65,10 +65,9 @@ pub const KEY_HOME: u16 = ecodes::KEY_HOME;
 pub const KEY_LIGHT: u16 = 90; // Unused on reMarkable
 pub const KEY_BACKWARD: u16 = ecodes::KEY_LEFT;
 pub const KEY_FORWARD: u16 = ecodes::KEY_RIGHT;
-
-// ---
-// TODO: Attempt integration / test
-pub const SLEEP_COVER: u16 = 59;
+pub const PEN_ERASE: u16 = 331;
+pub const PEN_HIGHLIGHT: u16 = 332;
+pub const SLEEP_COVER: [u16; 2] = [59, 35];
 // Synthetic touch button
 pub const BTN_TOUCH: u16 = 330;
 // ---
@@ -121,6 +120,7 @@ pub enum TouchProto {
     Single,
     MultiA,
     MultiB,
+    MultiC,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -155,6 +155,8 @@ pub enum ButtonCode {
     Light,
     Backward,
     Forward,
+    Erase,
+    Highlight,
     Raw(u16),
 }
 
@@ -166,6 +168,8 @@ impl ButtonCode {
             KEY_LIGHT => ButtonCode::Light,
             KEY_BACKWARD => resolve_button_direction(LinearDir::Backward, rotation, button_scheme),
             KEY_FORWARD => resolve_button_direction(LinearDir::Forward, rotation, button_scheme),
+            // TODO:
+            // Attempt to aad ButtonCode: highlight and/or erase
             _ => ButtonCode::Raw(code),
         }
     }
@@ -414,10 +418,10 @@ pub fn device_events(
 struct EvFinger {
     pos: Point,
     pos_updated: bool, // Report motion at SYN_REPORT?
-
     last_pressed: bool,
     pressed: bool,
 }
+
 impl Default for EvFinger {
     fn default() -> EvFinger {
         EvFinger {
@@ -521,6 +525,7 @@ pub fn parse_device_events(
         TouchProto::Single => SINGLE_TOUCH_CODES,
         TouchProto::MultiA => MULTI_TOUCH_CODES_A,
         TouchProto::MultiB => MULTI_TOUCH_CODES_B,
+        TouchProto::MultiC => MULTI_TOUCH_CODES_B,
     };
 
     if CURRENT_DEVICE.should_swap_axes(rotation) {
@@ -588,7 +593,7 @@ pub fn parse_device_events(
             } else if evt.code == ecodes::ABS_PRESSURE {
                 ev_fingers.entry(PEN_SLOT).or_default().pressed = evt.value > 0;
             }
-        } else if evt.kind == EV_SYN {
+        } else if evt.kind == EV_SYN && evt.code == SYN_REPORT {
             // The absolute value accounts for the wrapping around that might occur,
             // since `tv_sec` can't grow forever.
             if (evt.time.tv_sec - last_activity).abs() >= 60 {
@@ -637,7 +642,7 @@ pub fn parse_device_events(
                 println!("Unknown syn: {}", evt.code);
             }
         } else if evt.kind == EV_KEY {
-            if evt.code == SLEEP_COVER {
+            if SLEEP_COVER.contains(&evt.code) {
                 if evt.value == VAL_PRESS {
                     ty.send(DeviceEvent::CoverOn).ok();
                 } else if evt.value == VAL_RELEASE {

@@ -28,7 +28,6 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Duration;
 use anyhow::{Error, Context as ResultExt};
-use fxhash::FxHashMap;
 use chrono::Local;
 use sdl2::event::Event as SdlEvent;
 use sdl2::keyboard::{Scancode, Keycode, Mod};
@@ -41,7 +40,7 @@ use crate::framebuffer::{Framebuffer, UpdateMode};
 use crate::input::{DeviceEvent, FingerStatus};
 use crate::document::sys_info_as_html;
 use crate::view::{View, Event, ViewId, EntryId, AppCmd, EntryKind};
-use crate::view::{process_render_queue, handle_event, RenderQueue, RenderData};
+use crate::view::{process_render_queue, wait_for_all, handle_event, RenderQueue, RenderData};
 use crate::view::home::Home;
 use crate::view::reader::Reader;
 use crate::view::notification::Notification;
@@ -184,7 +183,7 @@ impl Framebuffer for WindowCanvas {
         let file = File::create(path).with_context(|| format!("can't create output file {}", path))?;
         let mut encoder = png::Encoder::new(file, width, height);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_color(png::ColorType::RGB);
+        encoder.set_color(png::ColorType::Rgb);
         let mut writer = encoder.write_header().with_context(|| format!("can't write PNG header for {}", path))?;
         let data = self.read_pixels(self.viewport(), PixelFormatEnum::RGB24).unwrap_or_default();
         writer.write_image_data(&data).with_context(|| format!("can't write PNG data to {}", path))?;
@@ -276,7 +275,7 @@ fn main() -> Result<(), Error> {
     let mut view: Box<dyn View> = Box::new(Home::new(context.fb.rect(), &tx,
                                                      &mut rq, &mut context)?);
 
-    let mut updating = FxHashMap::default();
+    let mut updating = Vec::new();
 
     if context.settings.frontlight {
         let levels = context.settings.frontlight_levels;
@@ -506,7 +505,7 @@ fn main() -> Result<(), Error> {
                     view = next_view;
                 },
                 Event::Select(EntryId::Rotate(n)) if n != context.display.rotation && view.might_rotate() => {
-                    updating.retain(|tok, _| context.fb.wait(*tok).is_err());
+                    wait_for_all(&mut updating, &mut context);
                     if let Ok(dims) = context.fb.set_rotation(n) {
                         context.display.rotation = n;
                         let fb_rect = Rectangle::from(dims);

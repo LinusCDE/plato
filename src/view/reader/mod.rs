@@ -39,7 +39,7 @@ use crate::view::search_bar::SearchBar;
 use crate::view::keyboard::Keyboard;
 use crate::view::menu::{Menu, MenuKind};
 use crate::view::notification::Notification;
-use crate::settings::{guess_frontlight, FinishedAction, SouthEastCornerAction};
+use crate::settings::{guess_frontlight, FinishedAction, SouthEastCornerAction, SouthStripAction, WestStripAction};
 use crate::settings::{DEFAULT_FONT_FAMILY, DEFAULT_TEXT_ALIGN, DEFAULT_LINE_HEIGHT, DEFAULT_MARGIN_WIDTH};
 use crate::settings::{HYPHEN_PENALTY, STRETCH_TOLERANCE};
 use crate::frontlight::LightLevels;
@@ -1698,15 +1698,22 @@ impl Reader {
                 return;
             }
 
+            let zoom_mode = self.view_port.zoom_mode;
+            let sf = if let ZoomMode::Custom(sf) = zoom_mode { sf } else { 1.0 };
+
             let mut entries = if self.reflowable {
                 if self.ephemeral {
                     vec![EntryKind::Command("Save".to_string(), EntryId::Save)]
                 } else {
-                    Vec::new()
+                    vec![EntryKind::SubMenu("Zoom Mode".to_string(), vec![
+                         EntryKind::RadioButton("Fit to Page".to_string(),
+                                                EntryId::SetZoomMode(ZoomMode::FitToPage),
+                                                zoom_mode == ZoomMode::FitToPage),
+                         EntryKind::RadioButton(format!("Custom ({:.1}%)", 100.0 * sf),
+                                                EntryId::SetZoomMode(ZoomMode::Custom(sf)),
+                                                zoom_mode == ZoomMode::Custom(sf))])]
                 }
             } else {
-                let zoom_mode = self.view_port.zoom_mode;
-                let sf = if let ZoomMode::Custom(sf) = zoom_mode { sf } else { 1.0 };
                 vec![EntryKind::SubMenu("Zoom Mode".to_string(), vec![
                      EntryKind::RadioButton("Fit to Page".to_string(),
                                             EntryId::SetZoomMode(ZoomMode::FitToPage),
@@ -1924,9 +1931,13 @@ impl Reader {
             let margin_width = self.info.reader.as_ref()
                                    .and_then(|r| if reflowable { r.margin_width } else { r.screen_margin_width })
                                    .unwrap_or_else(|| if reflowable { context.settings.reader.margin_width } else { 0 });
-            let entries = (0..=10).map(|mw| EntryKind::RadioButton(format!("{}", mw),
-                                                                  EntryId::SetMarginWidth(mw),
-                                                                  mw == margin_width)).collect();
+            let min_margin_width = context.settings.reader.min_margin_width;
+            let max_margin_width = context.settings.reader.max_margin_width;
+            let entries = (min_margin_width..=max_margin_width).map(|mw|
+                EntryKind::RadioButton(format!("{}", mw),
+                                       EntryId::SetMarginWidth(mw),
+                                       mw == margin_width)
+            ).collect();
             let margin_width_menu = Menu::new(rect, ViewId::MarginWidthMenu, MenuKind::DropDown, entries, context);
             rq.add(RenderData::new(margin_width_menu.id(), *margin_width_menu.rect(), UpdateMode::Gui));
             self.children.push(Box::new(margin_width_menu) as Box<dyn View>);
@@ -2338,9 +2349,9 @@ impl Reader {
 
     fn find_page_by_name(&self, name: &str) -> Option<usize> {
         self.info.reader.as_ref().and_then(|r| {
-            if let Ok(a) = u32::from_str_radix(name, 10) {
+            if let Ok(a) = name.parse::<u32>() {
                 r.page_names
-                 .iter().filter_map(|(i, s)| u32::from_str_radix(s, 10).ok().map(|b| (b, i)))
+                 .iter().filter_map(|(i, s)| s.parse::<u32>().ok().map(|b| (b, i)))
                  .filter(|(b, _)| *b <= a)
                  .max_by(|x, y| x.0.cmp(&y.0))
                  .map(|(b, i)| *i + (a - b) as usize)
@@ -2451,12 +2462,11 @@ impl Reader {
                            .find(|a| a.selection[0] == sel[0] && a.selection[1] == sel[1]))
     }
 
-    fn reseed(&mut self, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+    fn reseed(&mut self, rq: &mut RenderQueue, context: &mut Context) {
         if let Some(index) = locate::<TopBar>(self) {
-            self.child_mut(index).downcast_mut::<TopBar>().unwrap()
-                .update_frontlight_icon(&mut RenderQueue::new(), context);
-            hub.send(Event::ClockTick).ok();
-            hub.send(Event::BatteryTick).ok();
+            if let Some(top_bar) = self.child_mut(index).downcast_mut::<TopBar>() {
+                top_bar.reseed(rq, context);
+            }
         }
 
         rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
@@ -2571,17 +2581,13 @@ impl View for Reader {
 
             },
             Event::Gesture(GestureEvent::Pinch { axis: Axis::Horizontal, center, .. }) if self.rect.includes(center) => {
-                if !self.reflowable {
-                    self.set_zoom_mode(ZoomMode::FitToPage, true, hub, rq, context);
-                }
+                self.set_zoom_mode(ZoomMode::FitToPage, true, hub, rq, context);
                 true
             },
             Event::Gesture(GestureEvent::Spread { axis: Axis::Diagonal, center, factor }) |
             Event::Gesture(GestureEvent::Pinch { axis: Axis::Diagonal, center, factor }) if factor.is_finite() &&
                                                                                             self.rect.includes(center) => {
-                if !self.reflowable {
-                    self.scale_page(center, factor, hub, rq, context);
-                }
+                self.scale_page(center, factor, hub, rq, context);
                 true
             },
             Event::Gesture(GestureEvent::Arrow { dir, .. }) => {
@@ -3020,7 +3026,14 @@ impl View for Reader {
                         match dir {
                             Dir::West => {
                                 if self.search.is_none() {
-                                    self.go_to_neighbor(CycleDir::Previous, hub, rq, context);
+                                    match context.settings.reader.west_strip {
+                                        WestStripAction::PreviousPage => {
+                                            self.go_to_neighbor(CycleDir::Previous, hub, rq, context);
+                                        }
+                                        WestStripAction::NextPage => {
+                                            self.go_to_neighbor(CycleDir::Next, hub, rq, context);
+                                        }
+                                    }
                                 } else {
                                     self.go_to_results_neighbor(CycleDir::Previous, hub, rq, context);
                                 }
@@ -3032,7 +3045,15 @@ impl View for Reader {
                                     self.go_to_results_neighbor(CycleDir::Next, hub, rq, context);
                                 }
                             },
-                            Dir::South | Dir::North => self.toggle_bars(None, hub, rq, context),
+                            Dir::South => match context.settings.reader.south_strip {
+                                SouthStripAction::ToggleBars => {
+                                    self.toggle_bars(None, hub, rq, context);
+                                }
+                                SouthStripAction::NextPage => {
+                                    self.go_to_neighbor(CycleDir::Next, hub, rq, context);
+                                }
+                            },
+                            Dir::North => self.toggle_bars(None, hub, rq, context),
                         }
                     },
                     Region::Center => self.toggle_bars(None, hub, rq, context),
@@ -3123,6 +3144,11 @@ impl View for Reader {
                             self.go_to_page(0, true, hub, rq, context);
                         } else if text == ")" {
                             self.go_to_page(self.pages_count.saturating_sub(1), true, hub, rq, context);
+                        } else if let Some(percent) = text.strip_suffix('%') {
+                            if let Ok(number) = percent.parse::<f64>() {
+                                let location = (number.max(0.0).min(100.0) / 100.0 * self.pages_count as f64).round() as usize;
+                                self.go_to_page(location, true, hub, rq, context);
+                            }
                         } else if let Ok(number) = caps[2].parse::<f64>() {
                             let location = if !self.synthetic {
                                 let mut index = number.max(0.0) as usize;
@@ -3400,7 +3426,7 @@ impl View for Reader {
             Event::Select(EntryId::Bookmarks) => {
                 self.toggle_bars(Some(false), hub, rq, context);
                 if let Some(bookmarks) = self.info.reader.as_ref().map(|r| &r.bookmarks) {
-                    let html = bookmarks_as_html(&bookmarks, self.current_page, self.synthetic);
+                    let html = bookmarks_as_html(bookmarks, self.current_page, self.synthetic);
                     let link_uri = bookmarks.range(..= self.current_page).next_back()
                                             .map(|index| format!("@{}", index));
                     hub.send(Event::OpenHtml(html, link_uri)).ok();
@@ -3643,7 +3669,7 @@ impl View for Reader {
                 true
             },
             Event::Reseed => {
-                self.reseed(hub, rq, context);
+                self.reseed(rq, context);
                 true
             },
             Event::ToggleFrontlight => {

@@ -100,8 +100,8 @@ impl ToolBar {
                                            rect.max.x - 2 * side, rect.max.y],
                                      SliderId::FontSize,
                                      font_size,
-                                     reader_settings.font_size / 2.0,
-                                     3.0 * reader_settings.font_size / 2.0);
+                                     reader_settings.min_font_size,
+                                     reader_settings.max_font_size);
             children.push(Box::new(slider) as Box<dyn View>);
         } else {
             let remaining_width = rect.width() as i32 - 2 * side;
@@ -329,7 +329,6 @@ impl View for ToolBar {
             self.children[index].resize(rect![rect.min.x + 2 * side, rect.max.y - side,
                                               rect.max.x - 2 * side, rect.max.y],
                                         hub, rq, context);
-            index += 1;
         } else {
             let remaining_width = rect.width() as i32 - 2 * side;
             let slider_width = remaining_width / 2;
@@ -399,8 +398,9 @@ impl View for ToolBar {
                                               rect.max.x - 2 * side,
                                               rect.max.y],
                                         hub, rq, context);
-            index += 1;
         }
+
+        index += 1;
 
         // End of second row.
 

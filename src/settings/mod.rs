@@ -170,6 +170,7 @@ pub struct Settings {
     pub keyboard_layout: String,
     pub frontlight: bool,
     pub wifi: bool,
+    pub inverted: bool,
     pub sleep_cover: bool,
     pub auto_share: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,7 +239,7 @@ impl Default for LibrarySettings {
 pub struct ImportSettings {
     pub unshare_trigger: bool,
     pub startup_trigger: bool,
-    pub extract_epub_metadata: bool,
+    pub metadata_kinds: FxHashSet<String>,
     pub allowed_kinds: FxHashSet<String>,
 }
 
@@ -383,13 +384,19 @@ pub struct RefreshRateSettings {
 pub struct ReaderSettings {
     pub finished: FinishedAction,
     pub south_east_corner: SouthEastCornerAction,
+    pub south_strip: SouthStripAction,
+    pub west_strip: WestStripAction,
     pub strip_width: f32,
     pub corner_width: f32,
     pub font_path: String,
     pub font_family: String,
     pub font_size: f32,
+    pub min_font_size: f32,
+    pub max_font_size: f32,
     pub text_align: TextAlign,
     pub margin_width: i32,
+    pub min_margin_width: i32,
+    pub max_margin_width: i32,
     pub line_height: f32,
     pub dithered_kinds: FxHashSet<String>,
     pub paragraph_breaker: ParagraphBreakerSettings,
@@ -422,6 +429,20 @@ pub enum FinishedAction {
 pub enum SouthEastCornerAction {
     NextPage,
     GoToPage,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SouthStripAction {
+    ToggleBars,
+    NextPage,
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WestStripAction {
+    PreviousPage,
+    NextPage,
 }
 
 impl Default for RefreshRateSettings {
@@ -458,13 +479,19 @@ impl Default for ReaderSettings {
         ReaderSettings {
             finished: FinishedAction::Close,
             south_east_corner: SouthEastCornerAction::GoToPage,
+            south_strip: SouthStripAction::ToggleBars,
+            west_strip: WestStripAction::PreviousPage,
             strip_width: 0.6,
             corner_width: 0.4,
             font_path: DEFAULT_FONT_PATH.to_string(),
             font_family: DEFAULT_FONT_FAMILY.to_string(),
             font_size: DEFAULT_FONT_SIZE,
+            min_font_size: DEFAULT_FONT_SIZE / 2.0,
+            max_font_size: 3.0 * DEFAULT_FONT_SIZE / 2.0,
             text_align: DEFAULT_TEXT_ALIGN,
             margin_width: DEFAULT_MARGIN_WIDTH,
+            min_margin_width: DEFAULT_MARGIN_WIDTH.saturating_sub(8),
+            max_margin_width: DEFAULT_MARGIN_WIDTH.saturating_add(2),
             line_height: DEFAULT_LINE_HEIGHT,
             dithered_kinds: ["cbz", "png", "jpg", "jpeg"]
                 .iter()
@@ -481,11 +508,9 @@ impl Default for ImportSettings {
         ImportSettings {
             unshare_trigger: true,
             startup_trigger: true,
-            extract_epub_metadata: true,
-            allowed_kinds: ["pdf", "djvu", "epub", "fb2", "xps", "oxps", "cbz"]
-                .iter()
-                .map(|k| k.to_string())
-                .collect(),
+            metadata_kinds: ["epub", "pdf", "djvu"].iter().map(|k| k.to_string()).collect(),
+            allowed_kinds: ["pdf", "djvu", "epub", "fb2",
+                            "xps", "oxps", "cbz"].iter().map(|k| k.to_string()).collect(),
         }
     }
 }
@@ -522,6 +547,7 @@ impl Default for Settings {
             keyboard_layout: "English".to_string(),
             frontlight: true,
             wifi: false,
+            inverted: false,
             sleep_cover: true,
             auto_share: false,
             rotation_lock: None,

@@ -37,7 +37,8 @@ cp -R css dist
 find dist/css -name '*-user.css' -delete
 find dist/keyboard-layouts -name '*-user.json' -delete
 find dist/hyphenation-patterns -name '*.bounds' -delete
-cp target/armv7-unknown-linux-gnueabihf/release/plato dist/
+find dist/scripts -name 'wifi-*-*.sh' -delete
+cp target/arm-unknown-linux-gnueabihf/release/plato dist/
 cp contrib/*.sh dist
 cp contrib/Settings-sample.toml dist
 cp LICENSE-AGPLv3 dist

@@ -50,7 +50,7 @@ use rand_core::SeedableRng;
 use rand_xoshiro::Xoroshiro128Plus;
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
-use std::fs::{self, File};
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -59,7 +59,6 @@ use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 pub const APP_NAME: &str = "Plato";
-const FB_DEVICE: &str = "/dev/fb0";
 const RTC_DEVICE: &str = "/dev/rtc0";
 lazy_static! {
     pub static ref EVENT_BUTTONS: String = libremarkable::input::scan::SCANNED
@@ -443,7 +442,7 @@ enum ExitStatus {
 pub fn run() -> Result<(), Error> {
     let mut inactive_since = Instant::now();
     let mut exit_status = ExitStatus::Quit;
-    let mut fb = Box::new(RemarkableFramebuffer::new(FB_DEVICE).context("can't create framebuffer.")?);
+    let mut fb = Box::new(RemarkableFramebuffer::new(libremarkable::device::CURRENT_DEVICE.get_framebuffer_path()).context("can't create framebuffer.")?);
     let initial_rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
     let startup_rotation = CURRENT_DEVICE.startup_rotation();
     if !CURRENT_DEVICE.has_gyroscope() && initial_rotation != startup_rotation {

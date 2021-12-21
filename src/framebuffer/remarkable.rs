@@ -12,10 +12,8 @@ use libremarkable::framebuffer::cgmath;
 use libremarkable::framebuffer::common;
 use std::convert::TryInto;
 use crate::settings::RefreshQuality;
-use mmap;
-use mmap::MemoryMap;
-use std::os::unix::io::AsRawFd;
 use std::fs;
+use memmap2::MmapOptions;
 
 type ColorTransform = fn(u32, u32, u8) -> u8; // Copied from ./kobo.rs
 
@@ -259,12 +257,12 @@ impl Framebuffer for RemarkableFramebuffer {
         .unwrap();
 
         let mut writer = std::io::BufWriter::new(Vec::new());
-        libremarkable::image::png::PNGEncoder::new(&mut writer)
+        libremarkable::image::png::PngEncoder::new(&mut writer)
             .encode(
                 &*rgb888,
                 self.fb.var_screen_info.xres,
                 self.fb.var_screen_info.yres,
-                libremarkable::image::ColorType::RGB(8),
+                libremarkable::image::ColorType::Rgb8,
             )
             .unwrap();
 
@@ -287,21 +285,13 @@ impl Framebuffer for RemarkableFramebuffer {
 
         // If this is not done, the frame will be garbled
         // Kindly taken from libremarkable::framebuffer::core::Framebuffer::new()
-        self.fb.fix_screen_info = libremarkable::framebuffer::core::Framebuffer::get_fix_screeninfo(&self.fb.device); // Seems to change
+        self.fb.fix_screen_info = libremarkable::framebuffer::core::Framebuffer::get_fix_screeninfo(&self.fb.device, self.fb.swtfb_client.as_ref()); // Seems to change
         let frame_length = (self.fb.fix_screen_info.line_length * self.fb.var_screen_info.yres) as usize;
-        let mem_map = MemoryMap::new(
-            frame_length,
-            &[
-                mmap::MapOption::MapReadable,
-                mmap::MapOption::MapWritable,
-                mmap::MapOption::MapFd(self.fb.device.as_raw_fd()),
-                mmap::MapOption::MapOffset(0),
-                mmap::MapOption::MapNonStandardFlags(libc::MAP_SHARED),
-            ],
-        )
-        .unwrap();
+        let mem_map = MmapOptions::new()
+                .len(frame_length)
+                .map_raw(&self.fb.device)
+                .expect("Unable to map provided path");
         self.fb.frame = mem_map;
-
 
         Ok((self.width(), self.height())) // With and height have already updated
     }

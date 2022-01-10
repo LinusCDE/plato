@@ -442,7 +442,22 @@ enum ExitStatus {
 pub fn run() -> Result<(), Error> {
     let mut inactive_since = Instant::now();
     let mut exit_status = ExitStatus::Quit;
-    let mut fb = Box::new(RemarkableFramebuffer::new(libremarkable::device::CURRENT_DEVICE.get_framebuffer_path()).context("can't create framebuffer.")?);
+    let builtin_client_disabled =
+        if let Ok(content) = env::var("PLATO_DISABLE_BUILTIN_SWTFB_CLIENT") {
+            content.eq_ignore_ascii_case("true")
+                || content.eq_ignore_ascii_case("yes")
+                || content == "1"
+        } else {
+            false
+        };
+    let mut fb = Box::new(
+        RemarkableFramebuffer::new(if builtin_client_disabled {
+            "/dev/fb0"
+        } else {
+            libremarkable::device::CURRENT_DEVICE.get_framebuffer_path()
+        })
+        .context("can't create framebuffer.")?,
+    );
     let initial_rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
     let startup_rotation = CURRENT_DEVICE.startup_rotation();
     if !CURRENT_DEVICE.has_gyroscope() && initial_rotation != startup_rotation {

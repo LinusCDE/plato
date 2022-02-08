@@ -6,10 +6,12 @@ use anyhow::Error;
 use libremarkable;
 use libremarkable::framebuffer::cgmath;
 use libremarkable::framebuffer::common;
+use libremarkable::framebuffer::core::FramebufferUpdate;
 use libremarkable::framebuffer::refresh::PartialRefreshMode;
 use libremarkable::framebuffer::FramebufferBase;
 use libremarkable::framebuffer::FramebufferIO;
 use libremarkable::framebuffer::FramebufferRefresh;
+use memmap2::MmapOptions;
 use std::convert::TryInto;
 use std::fs;
 
@@ -57,30 +59,24 @@ pub struct RemarkableFramebuffer {
     transform: ColorTransform,
     dithered: bool,
     refresh_quality: RefreshQuality,
-    disable_builtin_client: bool,
     rotation_in_software: Option<SwRotation>,
 }
 
 impl RemarkableFramebuffer {
-    fn new_fb(disable_builtin_client: bool) -> libremarkable::framebuffer::core::Framebuffer {
-        if disable_builtin_client {
-            libremarkable::framebuffer::core::Framebuffer::device(
-                libremarkable::device::Model::Gen1.framebuffer_path(),
-            )
-        } else {
-            libremarkable::framebuffer::core::Framebuffer::default()
-        }
-    }
-
     pub fn new(disable_builtin_client: bool) -> Result<RemarkableFramebuffer, Error> {
         Ok(RemarkableFramebuffer {
-            fb: Self::new_fb(disable_builtin_client),
+            fb: if disable_builtin_client {
+                libremarkable::framebuffer::core::Framebuffer::device(
+                    libremarkable::device::Model::Gen1.framebuffer_path(),
+                )
+            } else {
+                libremarkable::framebuffer::core::Framebuffer::default()
+            },
             monochrome: false,
             inverted: false,
             dithered: false,
             transform: transform_identity,
             refresh_quality: Default::default(),
-            disable_builtin_client,
             rotation_in_software: match libremarkable::device::CURRENT_DEVICE.model {
                 libremarkable::device::Model::Gen1 => None,
                 _ => Some(SwRotation::Rot0),
@@ -382,7 +378,15 @@ impl Framebuffer for RemarkableFramebuffer {
         // fix_screen_info changes after rotation. Recreate framebuffer to get new
         // proper info and memory map.
         // If this is not done, the frame will be garbled
-        self.fb = Self::new_fb(self.disable_builtin_client);
+        if let FramebufferUpdate::Ioctl(device) = &self.fb.framebuffer_update {
+            self.fb.fix_screen_info = libremarkable::framebuffer::core::Framebuffer::get_fix_screeninfo(device); // Seems to change
+            let frame_length = (self.fb.fix_screen_info.line_length * self.fb.var_screen_info.yres) as usize;
+            let mem_map = MmapOptions::new()
+                .len(frame_length)
+                .map_raw(device.clone())
+                .expect("Unable to map provided path");
+            self.fb.frame = mem_map;
+        }
 
         Ok((self.width(), self.height())) // With and height have already updated
     }

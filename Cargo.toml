@@ -55,7 +55,7 @@ fxhash = "0.2.1"
 rand_core = "0.6.3"
 rand_xoshiro = "0.6.0"
 percent-encoding = "2.1.0"
-libremarkable = { version = "0.6.0", default-features = false, features = [ "framebuffer" ] }
+libremarkable = { git = "https://github.com/LinusCDE/libremarkable.git", rev = "fac09a85", default-features = false, features = [ "framebuffer" ] }
 memmap2 = "0.5.0"
 
 [dependencies.getopts]

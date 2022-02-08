@@ -1,40 +1,50 @@
-use std::ops::Drop;
-use anyhow::Error;
-use crate::geom::Rectangle;
+use super::{Framebuffer, UpdateMode};
 use crate::device::CURRENT_DEVICE;
-use super::{UpdateMode, Framebuffer};
+use crate::geom::Rectangle;
+use crate::settings::RefreshQuality;
+use anyhow::Error;
 use libremarkable;
+use libremarkable::framebuffer::cgmath;
+use libremarkable::framebuffer::common;
 use libremarkable::framebuffer::refresh::PartialRefreshMode;
 use libremarkable::framebuffer::FramebufferBase;
 use libremarkable::framebuffer::FramebufferIO;
 use libremarkable::framebuffer::FramebufferRefresh;
-use libremarkable::framebuffer::cgmath;
-use libremarkable::framebuffer::common;
 use std::convert::TryInto;
-use crate::settings::RefreshQuality;
 use std::fs;
-use memmap2::MmapOptions;
 
 type ColorTransform = fn(u32, u32, u8) -> u8; // Copied from ./kobo.rs
 
 pub struct RemarkableFramebuffer {
-    fb: libremarkable::framebuffer::core::Framebuffer<'static>,
+    fb: libremarkable::framebuffer::core::Framebuffer,
     monochrome: bool, // Currently stubbed
-    inverted: bool, // Currently stubbed
+    inverted: bool,   // Currently stubbed
     transform: ColorTransform,
     dithered: bool,
     refresh_quality: RefreshQuality,
+    disable_builtin_client: bool,
 }
 
 impl RemarkableFramebuffer {
-    pub fn new(fb_device_path: &'static str) -> Result<RemarkableFramebuffer, Error> {
+    fn new_fb(disable_builtin_client: bool) -> libremarkable::framebuffer::core::Framebuffer {
+        if disable_builtin_client {
+            libremarkable::framebuffer::core::Framebuffer::device(
+                libremarkable::device::Model::Gen1.framebuffer_path(),
+            )
+        } else {
+            libremarkable::framebuffer::core::Framebuffer::default()
+        }
+    }
+
+    pub fn new(disable_builtin_client: bool) -> Result<RemarkableFramebuffer, Error> {
         Ok(RemarkableFramebuffer {
-            fb: libremarkable::framebuffer::core::Framebuffer::from_path(fb_device_path),
+            fb: Self::new_fb(disable_builtin_client),
             monochrome: false,
             inverted: false,
             dithered: false,
             transform: transform_identity,
-            refresh_quality: Default::default()
+            refresh_quality: Default::default(),
+            disable_builtin_client,
         })
     }
 
@@ -242,19 +252,36 @@ impl Framebuffer for RemarkableFramebuffer {
     }
 
     fn save(&self, path: &str) -> Result<(), Error> {
-        let rgb565 = self.fb.dump_region(common::mxcfb_rect {
+        let rgb565 = self
+            .fb
+            .dump_region(common::mxcfb_rect {
                 top: 0,
                 left: 0,
                 width: self.fb.var_screen_info.xres,
                 height: self.fb.var_screen_info.yres,
-            }).unwrap();
+            })
+            .unwrap();
 
-        let rgb888 = libremarkable::framebuffer::storage::rgbimage_from_u8_slice(
-            self.fb.var_screen_info.xres,
-            self.fb.var_screen_info.yres,
-            &rgb565,
-        )
-        .unwrap();
+        let raw888: Vec<_> = self
+            .fb
+            .dump_region(common::mxcfb_rect {
+                top: 0,
+                left: 0,
+                width: self.width(),
+                height: self.height(),
+            })
+            .map_err(|str_err| anyhow::anyhow!(str_err))?
+            .chunks_exact(2)
+            .map(|pix| {
+                libremarkable::framebuffer::common::color::NATIVE_COMPONENTS(pix[0], pix[1])
+                    .to_rgb8()
+            })
+            .collect();
+        let width = self.width();
+        let rgb888: libremarkable::image::RgbImage =
+            libremarkable::image::ImageBuffer::from_fn(self.width(), self.height(), |x, y| {
+                libremarkable::image::Rgb(raw888[(y * width + x) as usize])
+            });
 
         let mut writer = std::io::BufWriter::new(Vec::new());
         libremarkable::image::png::PngEncoder::new(&mut writer)
@@ -283,15 +310,10 @@ impl Framebuffer for RemarkableFramebuffer {
         self.fb.var_screen_info.rotate = n as u32;
         self.fb.update_var_screeninfo();
 
+        // fix_screen_info changes after rotation. Recreate framebuffer to get new
+        // proper info and memory map.
         // If this is not done, the frame will be garbled
-        // Kindly taken from libremarkable::framebuffer::core::Framebuffer::new()
-        self.fb.fix_screen_info = libremarkable::framebuffer::core::Framebuffer::get_fix_screeninfo(&self.fb.device, self.fb.swtfb_client.as_ref()); // Seems to change
-        let frame_length = (self.fb.fix_screen_info.line_length * self.fb.var_screen_info.yres) as usize;
-        let mem_map = MmapOptions::new()
-                .len(frame_length)
-                .map_raw(&self.fb.device)
-                .expect("Unable to map provided path");
-        self.fb.frame = mem_map;
+        self.fb = Self::new_fb(self.disable_builtin_client);
 
         Ok((self.width(), self.height())) // With and height have already updated
     }
@@ -346,7 +368,6 @@ impl Framebuffer for RemarkableFramebuffer {
     fn height(&self) -> u32 {
         self.fb.var_screen_info.yres
     }
-
 }
 
 const DITHER_PITCH: u32 = 128; // Copied from ./kobo.rs

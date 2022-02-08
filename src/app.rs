@@ -450,14 +450,7 @@ pub fn run() -> Result<(), Error> {
         } else {
             false
         };
-    let mut fb = Box::new(
-        RemarkableFramebuffer::new(if builtin_client_disabled {
-            "/dev/fb0"
-        } else {
-            libremarkable::device::CURRENT_DEVICE.get_framebuffer_path()
-        })
-        .context("can't create framebuffer.")?,
-    );
+    let mut fb = Box::new(RemarkableFramebuffer::new(builtin_client_disabled).context("can't create framebuffer")?);
     let initial_rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
     let startup_rotation = CURRENT_DEVICE.startup_rotation();
     if !CURRENT_DEVICE.has_gyroscope() && initial_rotation != startup_rotation {

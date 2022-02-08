@@ -82,10 +82,6 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                    EntryId::Rotate(CURRENT_DEVICE.from_canonical(n)),
                                    n == rotation)
         ).collect::<Vec<EntryKind>>();
-        if CURRENT_LIBREMARKABLE_DEVICE.model == Model::Gen2 {
-            rotate.clear();
-            rotate.push(EntryKind::Message("Not yet implemented for the rM 2.".to_owned()));
-        }
 
         let apps = vec![EntryKind::Command("Dictionary".to_string(),
                                            EntryId::Launch(AppCmd::Dictionary { query: "".to_string(), language: "".to_string() })),

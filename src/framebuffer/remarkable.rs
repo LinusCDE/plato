@@ -15,6 +15,41 @@ use std::fs;
 
 type ColorTransform = fn(u32, u32, u8) -> u8; // Copied from ./kobo.rs
 
+#[repr(i8)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum SwRotation {
+    Rot0 = 1,
+    Rot90 = 2,
+    Rot180 = 3,
+    Rot270 = 0,
+}
+
+impl TryFrom<i8> for SwRotation {
+    type Error = anyhow::Error;
+
+    fn try_from(value: i8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Rot0),
+            2 => Ok(Self::Rot90),
+            3 => Ok(Self::Rot180),
+            0 => Ok(Self::Rot270),
+            _  => Err(anyhow::anyhow!("Invalid rotation value!"))
+        }
+    }
+}
+
+impl SwRotation {
+    /// Software position transformation to fake rotation
+    fn rotated(&self, pos: cgmath::Point2<i32>) -> cgmath::Point2<i32> {
+        match *self {
+            Self::Rot0 => cgmath::Point2 { x: pos.x, y: pos.y },
+            Self::Rot90 => cgmath::Point2 { x: common::DISPLAYWIDTH as i32 - pos.y, y: pos.x },
+            Self::Rot180 => cgmath::Point2 { x: common::DISPLAYWIDTH as i32 - pos.x, y: common::DISPLAYHEIGHT as i32 - pos.y },
+            Self::Rot270 => cgmath::Point2 { x: pos.y, y: common::DISPLAYHEIGHT as i32 - pos.x },
+        }
+    }
+}
+
 pub struct RemarkableFramebuffer {
     fb: libremarkable::framebuffer::core::Framebuffer,
     monochrome: bool, // Currently stubbed
@@ -23,6 +58,7 @@ pub struct RemarkableFramebuffer {
     dithered: bool,
     refresh_quality: RefreshQuality,
     disable_builtin_client: bool,
+    rotation_in_software: Option<SwRotation>,
 }
 
 impl RemarkableFramebuffer {
@@ -45,6 +81,10 @@ impl RemarkableFramebuffer {
             transform: transform_identity,
             refresh_quality: Default::default(),
             disable_builtin_client,
+            rotation_in_software: match libremarkable::device::CURRENT_DEVICE.model {
+                libremarkable::device::Model::Gen1 => None,
+                _ => Some(SwRotation::Rot0),
+            }
         })
     }
 
@@ -54,12 +94,20 @@ impl RemarkableFramebuffer {
             // Swap x and y
             self.fb.write_pixel(cgmath::Point2 { x: y as i32, y: x as i32 }, common::color::RGB(red, green, blue));
         }else {*/
-            self.fb.write_pixel(cgmath::Point2 { x: x as i32, y: y as i32 }, common::color::RGB(red, green, blue));
+        let mut pos = cgmath::Point2 { x: x as i32, y: y as i32 };
+        if let Some(ref rot) = self.rotation_in_software {
+            pos = rot.rotated(pos);
+        }
+        self.fb.write_pixel(pos, common::color::RGB(red, green, blue));
         //}
     }
 
     fn get_pixel_rgb(&self, x: u32, y: u32) -> [u8; 3] {
-        self.fb.read_pixel(cgmath::Point2 { x, y }).to_rgb8()
+        let mut pos = cgmath::Point2 { x: x as i32, y: y as i32 };
+        if let Some(ref rot) = self.rotation_in_software {
+            pos = rot.rotated(pos);
+        }
+        self.fb.read_pixel(pos.cast().unwrap()).to_rgb8()
     }
 }
 
@@ -78,7 +126,11 @@ impl Framebuffer for RemarkableFramebuffer {
             // Swap x and y
             self.fb.write_pixel(cgmath::Point2 { x: y as i32, y: x as i32 }, common::color::GRAY(255 - color));
         }else {*/
-            self.fb.write_pixel(cgmath::Point2 { x: x as i32, y: y as i32 }, common::color::GRAY(255 - color));
+        let mut pos = cgmath::Point2 { x: x as i32, y: y as i32 };
+        if let Some(ref rot) = self.rotation_in_software {
+            pos = rot.rotated(pos);
+        }
+        self.fb.write_pixel(pos, common::color::GRAY(255 - color));
         //}
     }
 
@@ -124,11 +176,24 @@ impl Framebuffer for RemarkableFramebuffer {
     /// represent this particular refresh job. Whether this update 
     /// is done can be checked using that token.
     fn update(&mut self, rect: &Rectangle, mode: UpdateMode) -> Result<u32, Error> {
-        let new_rect = common::mxcfb_rect {
-            left: rect.min.x as u32,
-            top: rect.min.y as u32,
-            width: rect.max.x as u32 - rect.min.x as u32,
-            height: rect.max.y as u32 - rect.min.y as u32,
+        let new_rect = if let Some(ref rot) = self.rotation_in_software {
+            let p1 = rot.rotated(cgmath::Point2 { x: rect.min.x, y: rect.min.y });
+            let p2 = rot.rotated(cgmath::Point2 { x: rect.max.x, y: rect.max.y });
+            let min = cgmath::Point2 { x: p1.x.min(p2.x), y: p1.y.min(p2.y) };
+            let max = cgmath::Point2 { x: p1.x.max(p2.x), y: p1.y.max(p2.y) };
+            common::mxcfb_rect {
+                left: min.x as u32,
+                top: min.y as u32,
+                width: max.x as u32 - min.x as u32,
+                height: max.y as u32 - min.y as u32,
+            }
+        }else {
+            common::mxcfb_rect {
+                left: rect.min.x as u32,
+                top: rect.min.y as u32,
+                width: rect.max.x as u32 - rect.min.x as u32,
+                height: rect.max.y as u32 - rect.min.y as u32,
+            }
         };
 
         let overwrite_dither = if self.dithered {
@@ -252,23 +317,16 @@ impl Framebuffer for RemarkableFramebuffer {
     }
 
     fn save(&self, path: &str) -> Result<(), Error> {
-        let rgb565 = self
-            .fb
-            .dump_region(common::mxcfb_rect {
-                top: 0,
-                left: 0,
-                width: self.fb.var_screen_info.xres,
-                height: self.fb.var_screen_info.yres,
-            })
-            .unwrap();
+        // True dimensions unaffected from sw rotation
+        let (width, height) = (self.fb.var_screen_info.xres, self.fb.var_screen_info.yres);
 
         let raw888: Vec<_> = self
             .fb
             .dump_region(common::mxcfb_rect {
                 top: 0,
                 left: 0,
-                width: self.width(),
-                height: self.height(),
+                width,
+                height,
             })
             .map_err(|str_err| anyhow::anyhow!(str_err))?
             .chunks_exact(2)
@@ -277,18 +335,24 @@ impl Framebuffer for RemarkableFramebuffer {
                     .to_rgb8()
             })
             .collect();
-        let width = self.width();
-        let rgb888: libremarkable::image::RgbImage =
-            libremarkable::image::ImageBuffer::from_fn(self.width(), self.height(), |x, y| {
+        let mut rgb888: libremarkable::image::RgbImage =
+            libremarkable::image::ImageBuffer::from_fn(width, height, |x, y| {
                 libremarkable::image::Rgb(raw888[(y * width + x) as usize])
             });
+        // Fix orientation of screenshot if screen is software rotated
+        match self.rotation_in_software {
+            Some(SwRotation::Rot90) => { rgb888 = libremarkable::image::imageops::rotate270(&rgb888); },
+            Some(SwRotation::Rot180) => { rgb888 = libremarkable::image::imageops::rotate180(&rgb888); },
+            Some(SwRotation::Rot270) => { rgb888 = libremarkable::image::imageops::rotate90(&rgb888); },
+            _ => {}
+        }
 
         let mut writer = std::io::BufWriter::new(Vec::new());
         libremarkable::image::png::PngEncoder::new(&mut writer)
             .encode(
                 &*rgb888,
-                self.fb.var_screen_info.xres,
-                self.fb.var_screen_info.yres,
+                rgb888.width(),
+                rgb888.height(),
                 libremarkable::image::ColorType::Rgb8,
             )
             .unwrap();
@@ -300,12 +364,17 @@ impl Framebuffer for RemarkableFramebuffer {
 
     #[inline]
     fn rotation(&self) -> i8 {
-        self.fb.var_screen_info.rotate as i8
+        match self.rotation_in_software {
+            Some(rot) => rot as i8,
+            None => self.fb.var_screen_info.rotate as i8,
+        }
     }
 
     fn set_rotation(&mut self, n: i8) -> Result<(u32, u32), Error> {
-        // This will probably not work.
-        // Not sure if the result is even correct.
+        if self.rotation_in_software.is_some() {
+            self.rotation_in_software = Some(SwRotation::try_from(n)?);
+            return Ok((self.width(), self.height()));
+        }
 
         self.fb.var_screen_info.rotate = n as u32;
         self.fb.update_var_screeninfo();
@@ -362,11 +431,17 @@ impl Framebuffer for RemarkableFramebuffer {
     }
 
     fn width(&self) -> u32 {
-        self.fb.var_screen_info.xres
+        match self.rotation_in_software {
+            Some(SwRotation::Rot90) | Some(SwRotation::Rot270) => self.fb.var_screen_info.yres, // Axis swapped
+            _ => self.fb.var_screen_info.xres,
+        }
     }
 
     fn height(&self) -> u32 {
-        self.fb.var_screen_info.yres
+        match self.rotation_in_software {
+            Some(SwRotation::Rot90) | Some(SwRotation::Rot270) => self.fb.var_screen_info.xres, // Axis swapped
+            _ => self.fb.var_screen_info.yres,
+        }
     }
 }
 

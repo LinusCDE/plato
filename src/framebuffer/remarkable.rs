@@ -383,7 +383,7 @@ impl Framebuffer for RemarkableFramebuffer {
             let frame_length = (self.fb.fix_screen_info.line_length * self.fb.var_screen_info.yres) as usize;
             let mem_map = MmapOptions::new()
                 .len(frame_length)
-                .map_raw(device.clone())
+                .map_raw(device)
                 .expect("Unable to map provided path");
             self.fb.frame = mem_map;
         }

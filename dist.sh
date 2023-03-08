@@ -11,20 +11,8 @@ mkdir -p dist/libs
 mkdir dist/dictionaries
 mkdir dist/media # Used for default library
 
-cp libs/libz.so dist/libs/libz.so.1
-cp libs/libbz2.so dist/libs/libbz2.so.1.0
-
-cp libs/libpng16.so dist/libs/libpng16.so.16
-cp libs/libjpeg.so dist/libs/libjpeg.so.9
-cp libs/libopenjp2.so dist/libs/libopenjp2.so.7
-cp libs/libjbig2dec.so dist/libs/libjbig2dec.so.0
-
-cp libs/libfreetype.so dist/libs/libfreetype.so.6
-cp libs/libharfbuzz.so dist/libs/libharfbuzz.so.0
-
-cp libs/libgumbo.so dist/libs/libgumbo.so.1
-cp libs/libdjvulibre.so dist/libs/libdjvulibre.so.21
-cp libs/libmupdf.so dist/libs
+# TOOD: Find out why plato now requires e.g. libz.so instead of libz.so.1 and fix it
+cp -a libs/* dist/libs/
 
 cp -R hyphenation-patterns dist
 cp -R keyboard-layouts dist

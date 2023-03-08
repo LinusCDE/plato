@@ -19,6 +19,12 @@ if ! rustup target list | grep "armv7-unknown-linux-gnueabihf (installed)" >/dev
   exit 1
 fi
 
+if ! which arm-linux-gnueabihf-gcc /dev/null 2>&1; then
+  echo 'You need to install a toolchain for compiling arm programs.' >&2
+  echo 'Search for a fitting package that provides commands like "arm-linux-gnueabihf-gcc"' >&2
+  exit 1
+fi
+
 ./clean.sh && \
 ./build.sh && \
 ./dist.sh || exit $?

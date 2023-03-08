@@ -27,7 +27,7 @@ Notes: The software automatically recognizes the running UI (xochitl) and kills 
 
 ### Compiling yourself
 
-You need rust (nightly) the oecore toolchain and the armv7-unknown-linux-gnueabihf target.
+You need rust (nightly) the a toolchain for compiling code for an arm system (e.g. search for a package that provides commands like "arm-linux-gnueabihf-gcc").
 
 After that, you can build the software using build.sh and create the same directory as attached using `dist.sh` (folder dist/).
 
@@ -49,9 +49,11 @@ Any 4.*X*.*Y* firmware, with *X* ≥ 6, will do.
 
 ## Supported devices
 
+- *Clara 2E*.
 - *Libra 2*.
 - *Sage*.
 - *Elipsa*.
+- *Nia*.
 - *Libra H₂O*.
 - *Forma*.
 - *Clara HD*.
@@ -63,6 +65,7 @@ Any 4.*X*.*Y* firmware, with *X* ≥ 6, will do.
 - *Aura*.
 - *Glo*.
 - *Touch C*.
+- *Touch B*.
 
 ## Supported formats
 

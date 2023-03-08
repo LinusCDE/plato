@@ -24,6 +24,8 @@ auto-power-off = 3
 # https://docs.rs/chrono/latest/chrono/format/strftime/index.html
 time-format = "%H:%M"
 date-format = "%A, %B %-d, %Y"
+# Appends the tapped external URLs to this file.
+external-urls-queue = "bin/article_fetcher/urls.txt"
 
 # You can create libraries by adding further [[libraries]] entries.
 [[libraries]]
@@ -56,6 +58,14 @@ first-column = "title-and-author"
 second-column = "progress"
 thumbnail-previews = true
 
+[[libraries]]
+name = "Dropbox"
+path = "/mnt/onboard/.kobo/dropbox"
+
+[[libraries]]
+name = "KePub"
+path = "/mnt/onboard/.kobo/kepub"
+
 # Defines the images displayed when entering an intermission.
 # Possible values: "logo:", "cover:", "/path/to/image/file".
 # If a relative file path is given, it will be relative to
@@ -83,14 +93,17 @@ finished = "close"
 # The action triggered when tapping the south-east corner.
 # Possible values: "go-to-page", "next-page".
 south-east-corner = "go-to-page"
+# The action triggered when making bottom right corner gesture.
+# Possible values: "toggle-dithered", "toggle-inverted".
+bottom-right-gesture = "toggle-dithered"
 # The action triggered when tapping the south strip.
 # Possible values: "toggle-bars", "next-page".
 south-strip = "toggle-bars"
 # The action triggered when tapping the west strip.
-# Possible values: "previous-page", "next-page".
+# Possible values: "previous-page", "next-page", "none".
 west-strip = "previous-page"
 # The action triggered when tapping the east strip.
-# Possible values: "previous-page", "next-page".
+# Possible values: "previous-page", "next-page", "none".
 east-strip = "next-page"
 # The width ratio, relative to `min(W, H) / 2`, of the strip and corner touch regions.
 # Launch the *Touch Events* application to display the current touch regions.
@@ -113,6 +126,11 @@ min-margin-width = 0
 max-margin-width = 10
 # The default line height, in ems.
 line-height = 1.2
+# Determine the scroll mode used for the fit-to-width zoom mode
+# when opening a new document.
+continuous-fit-to-width = true
+# Whether to ignore the document's style sheets.
+ignore-document-css = false
 # The file extensions of the files that will automatically be dithered
 # when opened for the first time.
 dithered-kinds = ["cbz", "jpg", "png", "jpeg"]
@@ -157,14 +175,16 @@ notify-success = true
 [sketch.pen]
 # The diameter of the pen tip, in pixels.
 size = 2
-# Vary the diameter according to the pen's velocity.
-dynamic = true
 # The current pen color.
 # Possible values: 0 … 255.
 color = 0
+# Vary the diameter according to the pen's velocity.
+dynamic = true
+# The amplitude of the diameter variation when `dynamic` is set.
+amplitude = 4.0
 # The pen speeds, in pixels per seconds, that clamps the pen's speed.
-# min-speed = 36
-# max-speed = 1800
+# min-speed = 0.0
+# max-speed = 3000.0
 
 [calculator]
 # The default font size and margin width, for the Calculator application.

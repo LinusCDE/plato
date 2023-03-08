@@ -15,7 +15,7 @@ case "$LOADED_MODULE" in
 				rmmod configfs
 				;;
 			*)
-				grep -q '^arcotg_udc\b' /proc/modules && rmmod arcotg_udc
+				[ "$PLATFORM" != mx6sl-ntx ] && rmmod arcotg_udc
 				;;
 		esac
 		;;

@@ -19,12 +19,6 @@ if ! rustup target list | grep "armv7-unknown-linux-gnueabihf (installed)" >/dev
   exit 1
 fi
 
-if [ ! -d /usr/local/oecore-x86_64/ ]; then
-  echo "Couldn't find the oecore toolchain at its default location" >&2
-  echo "Please install it from https://remarkable.engineering/" >&2
-  exit 1
-fi
-
 ./clean.sh && \
 ./build.sh && \
 ./dist.sh || exit $?

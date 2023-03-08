@@ -5,7 +5,7 @@ FROM buildpack-deps:stretch
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.57.0
+    RUST_VERSION=1.60.0
 
 RUN set -eux; \
     dpkgArch="$(dpkg --print-architecture)"; \
@@ -41,7 +41,7 @@ WORKDIR /plato
 
 ADD . /plato
 
-# Plato requires a specific version of the mupdf dev library for src/mupdf_wrapper
+# Plato requires a specific version of the mupdf dev library for /mupdf_wrapper
 RUN cd /plato/thirdparty && ./download.sh mupdf
 
 CMD ["./build.sh"]

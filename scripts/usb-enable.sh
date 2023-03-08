@@ -14,9 +14,7 @@ echo 3 > /proc/sys/vm/drop_caches
 
 for name in onboard sd ; do
 	DIR=/mnt/"$name"
-	if grep -q "$DIR" /proc/mounts ; then
-		umount "$DIR" || umount -l "$DIR"
-	fi
+	grep -q "$DIR" /proc/mounts && umount -l "$DIR"
 done
 
 VENDOR_ID=0x2237
@@ -42,7 +40,7 @@ else
 			;;
 		*)
 			MODULE_PARAMETERS="vendor=${VENDOR_ID} product=${PRODUCT_ID} vendor_id=Kobo product_id=eReader-${FIRMWARE_VERSION} SN=${SERIAL_NUMBER}"
-			if [ -e "$GADGETS"/arcotg_udc.ko ] ; then
+			if [ "$PLATFORM" != mx6sl-ntx ] ; then
 				insmod "$GADGETS"/arcotg_udc.ko
 				sleep 2
 			fi

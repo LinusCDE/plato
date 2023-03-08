@@ -1,86 +1,17 @@
-[package]
-authors = ["Bastien Dejean <nihilhill@gmail.com>"]
-name = "plato"
-version = "0.9.25"
-edition = "2021"
+[workspace]
 
-[[bin]]
-name = "plato"
-path = "src/main.rs"
+members = [
+  "crates/core",
+  "crates/plato",
+  "crates/emulator",
+  "crates/importer",
+  "crates/fetcher",
+]
 
-[[bin]]
-name = "plato-import"
-path = "src/importer.rs"
-required-features = ["importer"]
-
-[[bin]]
-name = "plato-emulator"
-path = "src/emulator.rs"
-required-features = ["emulator"]
-
-[[bin]]
-name = "article_fetcher"
-path = "src/fetcher.rs"
-required-features = ["fetcher"]
-
-[dependencies]
-bitflags = "1.3.2"
-downcast-rs = "1.2.0"
-lazy_static = "1.4.0"
-libc = "0.2.112"
-png = "0.17.2"
-regex = "1.5.4"
-serde = { version = "1.0.133", features = ["derive"] }
-serde_json = "1.0.75"
-titlecase = "1.1.0"
-unicode-normalization = "0.1.19"
-toml = "0.5.8"
-zip = "0.5.13"
-kl-hyphenate = "0.7.3"
-entities = "1.0.1"
-paragraph-breaker = "0.4.4"
-xi-unicode = "0.3.0"
-septem = "1.1.0"
-byteorder = "1.4.3"
-flate2 = "1.0.22"
-levenshtein = "1.0.5"
-nix = "0.23.1"
-indexmap = { version = "1.8.0", features = ["serde-1"] }
-anyhow = "1.0.52"
-thiserror = "1.0.30"
-walkdir = "2.3.2"
-globset = "0.4.8"
-filetime = "0.2.15"
-fxhash = "0.2.1"
-rand_core = "0.6.3"
-rand_xoshiro = "0.6.0"
-percent-encoding = "2.1.0"
-libremarkable = { git = "https://github.com/LinusCDE/libremarkable.git", rev = "fac09a85", default-features = false, features = [ "framebuffer" ] }
-memmap2 = "0.5.0"
-
-[dependencies.getopts]
-version = "0.2.21"
-optional = true
-
-[dependencies.reqwest]
-version = "0.11.9"
-features = ["rustls-tls", "json", "blocking"]
-default-features = false
-optional = true
-
-[dependencies.chrono]
-features = ["serde"]
-version = "0.4.19"
-
-[dependencies.sdl2]
-version = "0.35.1"
-optional = true
-
-[dependencies.signal-hook]
-version = "0.3.13"
-optional = true
-
-[features]
-importer = ["getopts"]
-emulator = ["sdl2"]
-fetcher = ["reqwest", "signal-hook"]
+[profile.release-minsized]
+inherits = "release"
+panic = "abort"
+codegen-units = 1
+opt-level = "z"
+lto = true
+strip = true

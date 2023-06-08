@@ -5,7 +5,15 @@
 [ -d bin ] || ./download.sh 'bin/*'
 [ -d resources ] || ./download.sh 'resources/*'
 [ -d hyphenation-patterns ] || ./download.sh 'hyphenation-patterns/*'
-[ -e target/armv7-unknown-linux-gnueabihf/release/plato ] || ./build.sh
+ARM_PLATO_BINARY="target/arm-unknown-linux-gnueabihf/release/plato"
+ARMV7_PLATO_BINARY="target/armv7-unknown-linux-gnueabihf/release/plato"
+[ -e $ARM_PLATO_BINARY -o -e $ARMV7_PLATO_BINARY ] || ./build.sh
+
+# Santity check to prevent later potential problems
+if [ -e $ARM_PLATO_BINARY -a -e $ARMV7_PLATO_BINARY ];
+  echo "Error: Found a plato binary for both arm AND armv7. This can lead to the wrong binary being used unexpectedly. Please delete one of them." >&2
+  exit 1
+fi
 
 mkdir -p dist/libs
 mkdir dist/dictionaries
@@ -26,8 +34,8 @@ find dist/css -name '*-user.css' -delete
 find dist/keyboard-layouts -name '*-user.json' -delete
 find dist/hyphenation-patterns -name '*.bounds' -delete
 find dist/scripts -name 'wifi-*-*.sh' -delete
-[ -d target/arm-unknown-linux-gnueabihf ] && cp target/arm-unknown-linux-gnueabihf/release/plato dist/
-[ -d target/armv7-unknown-linux-gnueabihf ] && cp target/armv7-unknown-linux-gnueabihf/release/plato dist/
+[ -e $ARM_PLATO_BINARY ] && cp $ARM_PLATO_BINARY dist/
+[ -e $ARMV7_PLATO_BINARY ] && cp $ARMV7_PLATO_BINARY dist/
 cp contrib/*.sh dist
 cp contrib/Settings-sample.toml dist
 cp LICENSE-AGPLv3 dist

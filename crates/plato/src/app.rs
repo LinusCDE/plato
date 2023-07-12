@@ -392,7 +392,7 @@ pub fn run() -> Result<(), Error> {
         .stdout(std::process::Stdio::null())
         .status()
     {
-        if status.code().unwrap() == 0 {
+        if status.success() {
             Command::new("systemctl")
                 .arg("stop")
                 .arg("xochitl")

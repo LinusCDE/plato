@@ -9,7 +9,7 @@ PARTITIONS="${DISK}0p3"
 
 [ -e "${DISK}1p1" ] && PARTITIONS="${PARTITIONS},${DISK}1p1"
 
-sync
+/bin/sync
 echo 3 > /proc/sys/vm/drop_caches
 
 for name in onboard sd ; do

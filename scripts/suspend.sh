@@ -1,5 +1,5 @@
 #! /bin/sh
 
-sync
+/bin/sync
 
 systemctl suspend

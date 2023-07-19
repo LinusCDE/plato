@@ -366,7 +366,7 @@ pub fn run() -> Result<(), Error> {
     let current_dir = env::current_dir()?;
 
     println!(
-        "{} is running on a Kobo {}.",
+        "{} is running on a {}.",
         APP_NAME, CURRENT_DEVICE.model
     );
     println!(

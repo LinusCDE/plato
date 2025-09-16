@@ -19,3 +19,4 @@
 /plato-*.zip
 /thirdparty/*/*
 !/thirdparty/*/*kobo*
+/.idea

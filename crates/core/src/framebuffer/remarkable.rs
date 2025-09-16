@@ -11,9 +11,11 @@ use libremarkable::framebuffer::PartialRefreshMode;
 use libremarkable::framebuffer::FramebufferBase;
 use libremarkable::framebuffer::FramebufferIO;
 use libremarkable::framebuffer::FramebufferRefresh;
+use libremarkable::image::{ExtendedColorType, ImageEncoder};
 use memmap2::MmapOptions;
 use std::convert::TryInto;
 use std::fs;
+use crate::color::Color;
 
 type ColorTransform = fn(u32, u32, u8) -> u8; // Copied from ./kobo.rs
 
@@ -63,23 +65,26 @@ pub struct RemarkableFramebuffer {
 }
 
 impl RemarkableFramebuffer {
-    pub fn new(disable_builtin_client: bool) -> Result<RemarkableFramebuffer, Error> {
+    pub fn new() -> Result<RemarkableFramebuffer, Error> {
+        let mut allow_hw_rotation = false;
+        if let Ok(value) = std::env::var("PLATO_ALLOW_HW_ROTATION") {
+            let value = value.to_lowercase();
+            if matches!(value.as_str(), "yes" | "true" | "on" | "1") {
+                allow_hw_rotation = true;
+            }
+        }
+
         Ok(RemarkableFramebuffer {
-            fb: if disable_builtin_client {
-                libremarkable::framebuffer::core::Framebuffer::device(
-                    libremarkable::device::Model::Gen1.framebuffer_path(),
-                )
-            } else {
-                libremarkable::framebuffer::core::Framebuffer::default()
-            },
+            fb: libremarkable::framebuffer::core::Framebuffer::new(), // <-- Checks env "LIBREMARKABLE_FB_DISFAVOR_INTERNAL_RM2FB"
             monochrome: false,
             inverted: false,
             dithered: false,
             transform: transform_identity,
             refresh_quality: Default::default(),
-            rotation_in_software: match libremarkable::device::CURRENT_DEVICE.model {
-                libremarkable::device::Model::Gen1 => None,
-                _ => Some(SwRotation::Rot0),
+            rotation_in_software: if allow_hw_rotation && matches!(libremarkable::device::CURRENT_DEVICE.model, libremarkable::device::Model::Gen1) {
+                None
+            }else {
+                Some(SwRotation::Rot0)
             }
         })
     }
@@ -116,7 +121,7 @@ impl Framebuffer for RemarkableFramebuffer {
         self.refresh_quality = quality;
     }
 
-    fn set_pixel(&mut self, x: u32, y: u32, color: u8) {
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
         // color seems to be inverted! Either in color::GRAY or from plato.
         /*if self.fb.var_screen_info.rotate % 2 == 0 {
             // Swap x and y
@@ -126,20 +131,26 @@ impl Framebuffer for RemarkableFramebuffer {
         if let Some(ref rot) = self.rotation_in_software {
             pos = rot.rotated(pos);
         }
-        self.fb.write_pixel(pos, common::color::GRAY(255 - color));
+        match color {
+            Color::Rgb(r, g, b) => self.fb.write_pixel(pos, common::color::RGB(255 - r, 255 - g, 255 - b)),
+            Color::Gray(gray) => self.fb.write_pixel(pos, common::color::GRAY(255 - gray)),
+        }
         //}
     }
 
-    fn set_blended_pixel(&mut self, x: u32, y: u32, color: u8, alpha: f32) {
+    fn set_blended_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f32) {
         if alpha >= 1.0 {
             self.set_pixel(x, y, color);
             return;
         }
         let rgb = self.get_pixel_rgb(x, y);
-        let color_alpha = color as f32 * alpha;
-        let red = color_alpha + (1.0 - alpha) * rgb[0] as f32;
-        let green = color_alpha + (1.0 - alpha) * rgb[1] as f32;
-        let blue = color_alpha + (1.0 - alpha) * rgb[2] as f32;
+        let (new_red, new_green, new_blue) = match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            Color::Gray(gray) => (gray, gray, gray),
+        };
+        let red = new_red as f32 * alpha + (1.0 - alpha) * rgb[0] as f32;
+        let green = new_green as f32 * alpha + (1.0 - alpha) * rgb[1] as f32;
+        let blue = new_blue as f32 * alpha + (1.0 - alpha) * rgb[2] as f32;
         self.set_pixel_rgb(x, y, [red as u8, green as u8, blue as u8]);
     }
 
@@ -344,12 +355,12 @@ impl Framebuffer for RemarkableFramebuffer {
         }
 
         let mut writer = std::io::BufWriter::new(Vec::new());
-        libremarkable::image::png::PngEncoder::new(&mut writer)
-            .encode(
+        libremarkable::image::codecs::png::PngEncoder::new(&mut writer)
+            .write_image(
                 &*rgb888,
                 rgb888.width(),
                 rgb888.height(),
-                libremarkable::image::ColorType::Rgb8,
+                ExtendedColorType::Rgb8,
             )
             .unwrap();
 

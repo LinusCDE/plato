@@ -1,30 +1,22 @@
 diff -ru a/Makefile b/Makefile
---- a/Makefile	2022-06-19 18:14:29.000000000 +0200
-+++ b/Makefile	2022-06-19 18:14:40.000000000 +0200
+--- a/Makefile	2023-11-14 09:46:57
++++ b/Makefile	2023-11-14 09:47:11
 @@ -150,7 +150,7 @@
- 
+
  THIRD_GLUT_OBJ := $(THIRD_GLUT_SRC:%.c=$(OUT)/%.o)
- 
+
 -MUPDF_SRC := $(sort $(wildcard source/fitz/*.c))
 +MUPDF_SRC := $(sort $(filter-out source/fitz/output-docx.c, $(wildcard source/fitz/*.c)))
  MUPDF_SRC += $(sort $(wildcard source/fitz/*.cpp))
  MUPDF_SRC += $(sort $(wildcard source/pdf/*.c))
  MUPDF_SRC += $(sort $(wildcard source/xps/*.c))
 diff -ru a/Makerules b/Makerules
---- a/Makerules	2022-06-19 18:14:29.000000000 +0200
-+++ b/Makerules	2022-06-19 18:14:40.000000000 +0200
-@@ -263,7 +263,6 @@
-   WINDRES = i686-w64-mingw32-windres
+--- a/Makerules	2023-11-14 09:46:58
++++ b/Makerules	2023-11-14 09:47:11
+@@ -321,6 +321,35 @@
    HAVE_WIN32=yes
  endif
--
- ifeq "$(OS)" "mingw64-cross"
-   build_prefix += $(OS)/
-   SO := dll
-@@ -276,6 +275,35 @@
-   HAVE_WIN32=yes
- endif
- 
+
 +ifeq "$(OS)" "kobo"
 +  CC = arm-linux-gnueabihf-gcc
 +  CXX = arm-linux-gnueabihf-g++
@@ -58,21 +50,26 @@ diff -ru a/Makerules b/Makerules
  # which is called from the Xcode project as a "Run Script" build step.
  # The following section works for both device and simulator builds.
 diff -ru a/Makethird b/Makethird
---- a/Makethird	2022-06-19 18:14:29.000000000 +0200
-+++ b/Makethird	2022-06-19 18:14:40.000000000 +0200
-@@ -45,7 +45,7 @@
- 
- # --- Include source file lists ---
- 
+--- a/Makethird	2023-11-14 09:46:58
++++ b/Makethird	2023-11-14 09:47:11
+@@ -43,10 +43,6 @@
+   endif
+ endif
+
+-# --- Include source file lists ---
+-
 -include Makelists
-+# include Makelists
- 
+-
  # --- FREETYPE 2 ---
- 
-@@ -238,33 +238,33 @@
- 
- # --- EXTRACT ---
- 
+
+ ifeq ($(USE_SYSTEM_FREETYPE),yes)
+@@ -235,36 +231,3 @@
+ 	$(CXX_CMD) $(LIB_CFLAGS) $(TESSERACT_CFLAGS) $(TESSERACT_BUILD_CFLAGS)
+ endif
+ endif
+-
+-# --- EXTRACT ---
+-
 -THIRD_CFLAGS += $(EXTRACT_CFLAGS)
 -THIRD_LIBS += $(EXTRACT_LIBS)
 -THIRD_SRC += $(EXTRACT_SRC)
@@ -101,49 +98,29 @@ diff -ru a/Makethird b/Makethird
 -		else echo python3 is older than 3.6 so not running docx_template_build.py; \
 -		fi
 -	@touch $@
-+# THIRD_CFLAGS += $(EXTRACT_CFLAGS)
-+# THIRD_LIBS += $(EXTRACT_LIBS)
-+# THIRD_SRC += $(EXTRACT_SRC)
-+# $(OUT)/thirdparty/extract/%.o: thirdparty/extract/%.c
-+# 	$(CC_CMD) $(WARNING_CFLAGS) $(LIB_CFLAGS) $(EXTRACT_CFLAGS) $(ZLIB_CFLAGS) $(EXTRACT_BUILD_CFLAGS)
-+
-+# # The first python3 command in the next two rules returns 0 (success) iff
-+# # python3 exists and is version 3.6 or later.
-+
-+# thirdparty/extract/src/docx_template.c: thirdparty/extract/src/template.docx thirdparty/extract/src/docx_template_build.py
-+# 	$(QUIET_GEN) if python3 -c 'import sys; sys.exit(sys.version_info < (3,6))'; \
-+# 		then python3 thirdparty/extract/src/docx_template_build.py \
-+# 			-i thirdparty/extract/src/template.docx \
-+# 			-n docx \
-+# 			-o thirdparty/extract/src/docx_template ; \
-+# 		else echo python3 is older than 3.6 so not running docx_template_build.py; \
-+# 		fi
-+# 	@touch $@
-+
-+# thirdparty/extract/src/odt_template.c: thirdparty/extract/src/template.odt thirdparty/extract/src/docx_template_build.py
-+# 	$(QUIET_GEN) if python3 -c 'import sys; sys.exit(sys.version_info < (3,6))'; \
-+# 		then python3 thirdparty/extract/src/docx_template_build.py \
-+# 			-i thirdparty/extract/src/template.odt \
-+# 			-n odt \
-+# 			-o thirdparty/extract/src/odt_template ; \
-+# 		else echo python3 is older than 3.6 so not running docx_template_build.py; \
-+# 		fi
-+# 	@touch $@
- 
+-
 -generate: thirdparty/extract/src/docx_template.c
-+# generate: thirdparty/extract/src/docx_template.c
-diff -ru a/source/svg/svg-run.c b/source/svg/svg-run.c
---- a/source/svg/svg-run.c	2022-06-19 18:14:29.000000000 +0200
-+++ b/source/svg/svg-run.c	2022-06-19 18:16:03.000000000 +0200
-@@ -1022,9 +1022,9 @@
- 	if (fill_rule_att)
- 	{
- 		if (!strcmp(fill_rule_att, "nonzero"))
--			state->fill_rule = 1;
--		if (!strcmp(fill_rule_att, "evenodd"))
- 			state->fill_rule = 0;
-+		if (!strcmp(fill_rule_att, "evenodd"))
-+			state->fill_rule = 1;
- 	}
- 
- 	if (stroke_att)
+diff -ru a/source/html/html-parse.c b/source/html/html-parse.c
+--- a/source/html/html-parse.c	2023-11-14 09:46:58
++++ b/source/html/html-parse.c	2023-11-14 09:59:43
+@@ -1615,13 +1615,13 @@
+ }
+
+ static const char *mobi_font_size[7] = {
+-	"8pt",
+-	"10pt",
+-	"12pt",
+-	"14pt",
+-	"16pt",
+-	"18pt",
+-	"20pt",
++	"0.67em",
++	"0.83em",
++	"1em",
++	"1.17em",
++	"1.33em",
++	"1.5em",
++	"1.67em",
+ };
+
+ static void

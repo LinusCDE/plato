@@ -38,6 +38,22 @@ pub struct RtcWkalrm {
     time: RtcTime,
 }
 
+impl RtcTime {
+    fn year(&self) -> i32 {
+        1900 + self.tm_year as i32
+    }
+}
+
+impl RtcWkalrm {
+    pub fn enabled(&self) -> bool {
+        self.enabled == 1
+    }
+
+    pub fn year(&self) -> i32 {
+        self.time.year()
+    }
+}
+
 pub struct Rtc(File);
 
 impl Rtc {
@@ -55,8 +71,8 @@ impl Rtc {
         }
     }
 
-    pub fn set_alarm(&self, days: u8) -> Result<i32, Error> {
-        let wt = Utc::now() + Duration::days(days as i64);
+    pub fn set_alarm(&self, days: f32) -> Result<i32, Error> {
+        let wt = Utc::now() + Duration::seconds((86_400.0 * days) as i64);
         let rwa = RtcWkalrm {
             enabled: 1,
             pending: 0,
@@ -73,10 +89,6 @@ impl Rtc {
             },
         };
         unsafe { rtc_write_alarm(self.0.as_raw_fd(), &rwa).map_err(|e| e.into()) }
-    }
-
-    pub fn is_alarm_enabled(&self) -> Result<bool, Error> {
-        self.alarm().map(|rwa| rwa.enabled == 1)
     }
 
     pub fn disable_alarm(&self) -> Result<i32, Error> {

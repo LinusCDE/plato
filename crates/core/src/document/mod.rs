@@ -18,8 +18,7 @@ use regex::Regex;
 use nix::sys::statvfs;
 #[cfg(target_os = "linux")]
 use nix::sys::sysinfo;
-use fxhash::{FxHashMap, FxHashSet};
-use lazy_static::lazy_static;
+use fxhash::FxHashMap;
 use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::{is_combining_mark};
 use serde::{Serialize, Deserialize};
@@ -102,7 +101,7 @@ pub trait Document: Send+Sync {
     fn links(&mut self, loc: Location) -> Option<(Vec<BoundedText>, usize)>;
     fn images(&mut self, loc: Location) -> Option<(Vec<Boundary>, usize)>;
 
-    fn pixmap(&mut self, loc: Location, scale: f32) -> Option<(Pixmap, usize)>;
+    fn pixmap(&mut self, loc: Location, scale: f32, samples: usize) -> Option<(Pixmap, usize)>;
     fn layout(&mut self, width: u32, height: u32, font_size: f32, dpi: u16);
     fn set_font_family(&mut self, family_name: &str, search_path: &str);
     fn set_margin_width(&mut self, width: i32);
@@ -126,10 +125,10 @@ pub trait Document: Send+Sync {
         Err(format_err!("this document can't be saved"))
     }
 
-    fn preview_pixmap(&mut self, width: f32, height: f32) -> Option<Pixmap> {
+    fn preview_pixmap(&mut self, width: f32, height: f32, samples: usize) -> Option<Pixmap> {
         self.dims(0).and_then(|dims| {
             let scale = (width / dims.0).min(height / dims.1);
-            self.pixmap(Location::Exact(0), scale)
+            self.pixmap(Location::Exact(0), scale, samples)
         }).map(|(pixmap, _)| pixmap)
     }
 
@@ -241,7 +240,10 @@ pub fn open<P: AsRef<Path>>(path: P) -> Option<Box<dyn Document>> {
                 })
             },
             _ => {
-                PdfOpener::new().and_then(|o| {
+                PdfOpener::new().and_then(|mut o| {
+                    if matches!(k.as_ref(), "mobi" | "fb2" | "xps" | "txt") {
+                        o.load_user_stylesheet();
+                    }
                     o.open(path)
                      .map(|d| Box::new(d) as Box<dyn Document>)
                 })
@@ -482,7 +484,7 @@ pub fn sys_info_as_html() -> String {
 
     for (name, var) in [("Code name", "PRODUCT"),
                          ("Model number", "MODEL_NUMBER"),
-                         ("Firmare version", "FIRMWARE_VERSION")].iter() {
+                         ("Firmware version", "FIRMWARE_VERSION")].iter() {
         if let Ok(value) = env::var(var) {
             buf.push_str("\t\t\t<tr>\n");
             buf.push_str(&format!("\t\t\t\t<td class=\"key\">{}</td>\n", name));
@@ -582,60 +584,4 @@ pub fn sys_info_as_html() -> String {
 
     buf.push_str("\t\t</table>\n\t</body>\n</html>");
     buf
-}
-
-// cd mupdf/source && awk '/_extensions\[/,/}/' */*.c
-lazy_static! {
-pub static ref RECOGNIZED_KINDS: FxHashSet<&'static str> =
-    [
-    // djvu
-    "djvu",
-    "djv",
-    // cbz
-    "cbt",
-    "cbz",
-    "tar",
-    "zip",
-    // img
-    "bmp",
-    "gif",
-    "hdp",
-    "j2k",
-    "jfif",
-    "jfif-tbnl",
-    "jp2",
-    "jpe",
-    "jpeg",
-    "jpg",
-    "jpx",
-    "jxr",
-    "pam",
-    "pbm",
-    "pgm",
-    "png",
-    "pnm",
-    "ppm",
-    "wdp",
-    // tiff
-    "tif",
-    "tiff",
-    // gprf
-    "gproof",
-    // epub
-    "epub",
-    // html
-    "fb2",
-    "htm",
-    "html",
-    "xhtml",
-    "xml",
-    // pdf
-    "pdf",
-    "ai",
-    // svg
-    "svg",
-    // xps
-    "oxps",
-    "xps",
-    ].iter().cloned().collect();
 }

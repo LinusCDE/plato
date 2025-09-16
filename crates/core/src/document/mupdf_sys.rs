@@ -3,7 +3,7 @@
 use std::mem;
 
 pub const FZ_MAX_COLORS: usize = 32;
-pub const FZ_VERSION: &str = "1.20.0";
+pub const FZ_VERSION: &str = "1.23.11";
 
 pub const FZ_META_INFO_AUTHOR: &str = "info:Author";
 pub const FZ_META_INFO_TITLE: &str = "info:Title";
@@ -33,6 +33,9 @@ pub enum FzAllocContext {}
 pub enum FzLocksContext {}
 pub enum FzCookie {}
 pub enum FzStoreDropFn {}
+pub enum FzLinkSetRectFn {}
+pub enum FzLinkSetUriFn {}
+pub enum FzLinkDropLinkFn {}
 pub enum FzSeparations {}
 pub enum FzImage {}
 
@@ -70,6 +73,7 @@ extern {
     pub fn fz_run_page(ctx: *mut FzContext, page: *mut FzPage, dev: *mut FzDevice, mat: FzMatrix, cookie: *mut FzCookie);
     pub fn mp_load_links(ctx: *mut FzContext, page: *mut FzPage) -> *mut FzLink;
     pub fn fz_drop_link(ctx: *mut FzContext, link: *mut FzLink);
+    pub fn fz_resolve_link_dest(ctx: *mut FzContext, doc: *mut FzDocument, uri: *const libc::c_char) -> FzLinkDest;
     pub fn mp_new_stext_page_from_page(ctx: *mut FzContext, page: *mut FzPage, options: *const FzTextOptions) -> *mut FzTextPage;
     pub fn fz_drop_stext_page(ctx: *mut FzContext, tp: *mut FzTextPage);
     pub fn fz_new_bbox_device(ctx: *mut FzContext, rect: *mut FzRect) -> *mut FzDevice;
@@ -142,6 +146,17 @@ pub struct FzTextOptions {
 }
 
 #[repr(C)]
+pub struct FzLinkDest {
+    pub loc: FzLocation,
+    pub kind: libc::c_int,
+    pub x: libc::c_float,
+    pub y: libc::c_float,
+    pub w: libc::c_float,
+    pub h: libc::c_float,
+    pub zoom: libc::c_float,
+}
+
+#[repr(C)]
 pub struct FzPixmap {
     storable: FzStorable,
     x: libc::c_int,
@@ -173,6 +188,9 @@ pub struct FzLink {
     pub next: *mut FzLink,
     pub rect: FzRect,
     pub uri: *mut libc::c_char,
+    set_rect_fn: *mut FzLinkSetRectFn,
+    set_uri_fn: *mut FzLinkSetUriFn,
+    drop: *mut FzLinkDropLinkFn,
 }
 
 #[repr(C)]

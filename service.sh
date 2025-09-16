@@ -1,8 +1,14 @@
-#! /bin/sh
+#!/bin/sh
 
 if [ $# -lt 1 ]; then
 	printf 'Usage: %s CMD [OPTS].\n' "${0##*/}" 1>&2
 	exit 1
+fi
+
+if ! [ -e thirdparty/mupdf/include ]; then
+	cd thirdparty || exit 1
+	./download.sh mupdf
+	cd -
 fi
 
 WRAPPER_PATH=mupdf_wrapper

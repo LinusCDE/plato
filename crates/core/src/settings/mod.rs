@@ -1,19 +1,19 @@
 mod preset;
 
 use crate::input::{EVENT_TOUCH_SCREEN, EVENT_WACOM};
-use crate::color::BLACK;
 use crate::device::CURRENT_DEVICE;
-use crate::frontlight::LightLevels;
 use crate::input::ButtonCode;
-use crate::metadata::{SortMethod, TextAlign};
-use crate::unit::mm_to_px;
-use fxhash::FxHashSet;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::env;
-use std::fmt::{self, Debug};
 use std::ops::Index;
+use std::fmt::{self, Debug};
 use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap};
+use fxhash::FxHashSet;
+use serde::{Serialize, Deserialize};
+use crate::metadata::{SortMethod, TextAlign};
+use crate::frontlight::LightLevels;
+use crate::color::{Color, BLACK};
+use crate::unit::mm_to_px;
 
 pub use self::preset::{guess_frontlight, LightPreset};
 
@@ -176,8 +176,8 @@ pub struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation_lock: Option<RotationLock>,
     pub button_scheme: ButtonScheme,
-    pub auto_suspend: u8,
-    pub auto_power_off: u8,
+    pub auto_suspend: f32,
+    pub auto_power_off: f32,
     pub time_format: String,
     pub date_format: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,9 +223,8 @@ impl Default for LibrarySettings {
     fn default() -> Self {
         LibrarySettings {
             name: "Unnamed".to_string(),
-            path: env::current_dir()
-                .ok()
-                .unwrap_or_else(|| PathBuf::from("/")),
+            path: env::current_dir().ok()
+                      .unwrap_or_else(|| PathBuf::from("/")),
             mode: LibraryMode::Database,
             sort_method: SortMethod::Opened,
             first_column: FirstColumn::TitleAndAuthor,
@@ -241,6 +240,7 @@ impl Default for LibrarySettings {
 pub struct ImportSettings {
     pub unshare_trigger: bool,
     pub startup_trigger: bool,
+    pub sync_metadata: bool,
     pub metadata_kinds: FxHashSet<String>,
     pub allowed_kinds: FxHashSet<String>,
 }
@@ -284,7 +284,7 @@ pub struct CalculatorSettings {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Pen {
     pub size: i32,
-    pub color: u8,
+    pub color: Color,
     pub dynamic: bool,
     pub amplitude: f32,
     pub min_speed: f32,
@@ -376,9 +376,19 @@ pub struct HomeSettings {
     pub max_trash_size: u64,
 }
 
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct RefreshRateSettings {
+    #[serde(flatten)]
+    pub global: RefreshRatePair,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub by_kind: HashMap<String, RefreshRatePair>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RefreshRatePair {
     pub regular: u8,
     pub inverted: u8,
 }
@@ -472,8 +482,8 @@ pub enum WestStripAction {
 impl Default for RefreshRateSettings {
     fn default() -> Self {
         RefreshRateSettings {
-            regular: 8,
-            inverted: 2,
+            global: RefreshRatePair { regular: 8, inverted: 2 },
+            by_kind: HashMap::new(),
         }
     }
 }
@@ -533,9 +543,10 @@ impl Default for ImportSettings {
         ImportSettings {
             unshare_trigger: true,
             startup_trigger: true,
+            sync_metadata: true,
             metadata_kinds: ["epub", "pdf", "djvu"].iter().map(|k| k.to_string()).collect(),
-            allowed_kinds: ["pdf", "djvu", "epub", "fb2",
-                            "xps", "oxps", "cbz"].iter().map(|k| k.to_string()).collect(),
+            allowed_kinds: ["pdf", "djvu", "epub", "fb2", "txt",
+                            "xps", "oxps", "mobi", "cbz"].iter().map(|k| k.to_string()).collect(),
         }
     }
 }
@@ -552,23 +563,21 @@ impl Default for BatterySettings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            selected_library: if CURRENT_DEVICE.has_removable_storage() {
-                1
-            } else {
-                0
-            },
-            libraries: vec![LibrarySettings {
-                name: "Media".to_string(),
-                path: PathBuf::from("media"),
-                hooks: vec![Hook {
-                    path: PathBuf::from("Articles"),
-                    program: PathBuf::from("bin/article_fetcher/article_fetcher"),
-                    sort_method: Some(SortMethod::Added),
-                    first_column: Some(FirstColumn::TitleAndAuthor),
-                    second_column: Some(SecondColumn::Progress),
-                }],
-                ..Default::default()
-            }],
+            selected_library: 0,
+            libraries: vec![
+                LibrarySettings {
+                    name: "Media".to_string(),
+                    path: PathBuf::from("media"),
+                    hooks: vec![Hook {
+                        path: PathBuf::from("Articles"),
+                        program: PathBuf::from("bin/article_fetcher/article_fetcher"),
+                        sort_method: Some(SortMethod::Added),
+                        first_column: Some(FirstColumn::TitleAndAuthor),
+                        second_column: Some(SecondColumn::Progress),
+                    }],
+                    ..Default::default()
+                },
+            ],
             external_urls_queue: Some(PathBuf::from("bin/article_fetcher/urls.txt")),
             keyboard_layout: "English".to_string(),
             frontlight: true,
@@ -578,8 +587,8 @@ impl Default for Settings {
             auto_share: false,
             rotation_lock: None,
             button_scheme: ButtonScheme::Natural,
-            auto_suspend: 30,
-            auto_power_off: 3,
+            auto_suspend: 30.0,
+            auto_power_off: 3.0,
             time_format: "%H:%M".to_string(),
             date_format: "%A, %B %-d, %Y".to_string(),
             intermissions: Intermissions {

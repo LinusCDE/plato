@@ -15,10 +15,10 @@ auto-share = false
 button-scheme = "natural"
 # The number of minutes of inactivity after which a device
 # will automatically go to sleep. *Zero* means *never*.
-auto-suspend = 30
+auto-suspend = 30.0
 # The delay, in days, after which a suspended device
 # will power off. *Zero* means *never*.
-auto-power-off = 3
+auto-power-off = 3.0
 # Formats used for the clock and the clock's pop-up menu.
 # The available specifiers are described at:
 # https://docs.rs/chrono/latest/chrono/format/strftime/index.html
@@ -109,7 +109,8 @@ east-strip = "next-page"
 # Launch the *Touch Events* application to display the current touch regions.
 strip-width = 0.6
 corner-width = 0.4
-# The path for the user's font directory.
+# The path for the user's custom font directory.
+# Note: this does not exist by default.
 font-path = "/mnt/onboard/fonts"
 # The default serif font.
 font-family = "Libertinus Serif"
@@ -147,17 +148,23 @@ stretch-tolerance = 1.26
 regular = 8
 inverted = 2
 
+# Override the refresh rates for individual file types.
+# [reader.refresh-rate.by-kind]
+# cbz = { regular = 1, inverted = 1 }
+
 [import]
 # Start the import process when the device is unplugged from a computer.
 unshare-trigger = true
 # Start the import process when *Plato* starts.
 startup-trigger = true
+# When a document changes, re-extract its metadata.
+sync-metadata = true
 # The file extensions of the documents for which the metadata extraction
 # process will occur.
 metadata-kinds = ["epub", "pdf", "djvu"]
 # The file extensions of the documents that will be considered during the
 # import process.
-allowed-kinds = ["djvu", "xps", "fb2", "pdf", "oxps", "cbz", "epub"]
+allowed-kinds = ["djvu", "xps", "fb2", "txt", "pdf", "oxps", "cbz", "epub"]
 
 [dictionary]
 # The default font size and margin width, for the Dictionary application.
@@ -177,7 +184,7 @@ notify-success = true
 size = 2
 # The current pen color.
 # Possible values: 0 … 255.
-color = 0
+color = { gray = 0 }
 # Vary the diameter according to the pen's velocity.
 dynamic = true
 # The amplitude of the diameter variation when `dynamic` is set.

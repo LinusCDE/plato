@@ -15,7 +15,7 @@ use sdl2::mouse::MouseState;
 use sdl2::rect::Point as SdlPoint;
 use sdl2::rect::Rect as SdlRect;
 use plato_core::framebuffer::{Framebuffer, UpdateMode};
-use plato_core::input::{DeviceEvent, FingerStatus};
+use plato_core::input::{DeviceEvent, FingerStatus, ButtonCode, ButtonStatus};
 use plato_core::document::sys_info_as_html;
 use plato_core::view::{View, Event, ViewId, EntryId, AppCmd, EntryKind};
 use plato_core::view::{process_render_queue, wait_for_all, handle_event, RenderQueue, RenderData};
@@ -36,6 +36,7 @@ use plato_core::view::common::{toggle_input_history_menu, toggle_keyboard_layout
 use plato_core::helpers::{load_toml, save_toml};
 use plato_core::settings::{Settings, SETTINGS_PATH, IntermKind};
 use plato_core::geom::{Rectangle, Axis};
+use plato_core::color::Color;
 use plato_core::gesture::{GestureEvent, gesture_events};
 use plato_core::device::CURRENT_DEVICE;
 use plato_core::battery::{Battery, FakeBattery};
@@ -55,7 +56,7 @@ const CLOCK_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub fn build_context(fb: Box<dyn Framebuffer>) -> Result<Context, Error> {
     let settings = load_toml::<Settings, _>(SETTINGS_PATH)?;
     let library_settings = &settings.libraries[settings.selected_library];
-    let library = Library::new(&library_settings.path, library_settings.mode);
+    let library = Library::new(&library_settings.path, library_settings.mode)?;
 
     let battery = Box::new(FakeBattery::new()) as Box<dyn Battery>;
     let frontlight = Box::new(LightLevels::default()) as Box<dyn Frontlight>;
@@ -93,16 +94,31 @@ pub fn device_event(event: SdlEvent) -> Option<DeviceEvent> {
     }
 }
 
+fn code_from_key(key: Scancode) -> Option<ButtonCode> {
+    match key {
+        Scancode::B => Some(ButtonCode::Backward),
+        Scancode::F => Some(ButtonCode::Forward),
+        Scancode::P => Some(ButtonCode::Power),
+        Scancode::L => Some(ButtonCode::Light),
+        Scancode::H => Some(ButtonCode::Home),
+        Scancode::E => Some(ButtonCode::Erase),
+        Scancode::G => Some(ButtonCode::Highlight),
+        _ => None,
+    }
+}
+
 struct FBCanvas(WindowCanvas);
 
 impl Framebuffer for FBCanvas {
-    fn set_pixel(&mut self, x: u32, y: u32, color: u8) {
-        self.0.set_draw_color(SdlColor::RGB(color, color, color));
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
+        let [red, green, blue] = color.rgb();
+        self.0.set_draw_color(SdlColor::RGB(red, green, blue));
         self.0.draw_point(SdlPoint::new(x as i32, y as i32)).unwrap();
     }
 
-    fn set_blended_pixel(&mut self, x: u32, y: u32, color: u8, alpha: f32) {
-        self.0.set_draw_color(SdlColor::RGBA(color, color, color, (alpha * 255.0) as u8));
+    fn set_blended_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f32) {
+        let [red, green, blue] = color.rgb();
+        self.0.set_draw_color(SdlColor::RGBA(red, green, blue, (alpha * 255.0) as u8));
         self.0.draw_point(SdlPoint::new(x as i32, y as i32)).unwrap();
     }
 
@@ -116,7 +132,11 @@ impl Framebuffer for FBCanvas {
                 for x in rect.min.x..rect.max.x {
                     let u = (x - rect.min.x) as u32;
                     let addr = 3 * (v * width + u);
-                    let color = 255 - data[addr as usize];
+                    let red = data[addr as usize];
+                    let green = data[(addr+1) as usize];
+                    let blue = data[(addr+2) as usize];
+                    let mut color = Color::Rgb(red, green, blue);
+                    color.invert();
                     self.set_pixel(x as u32, y as u32, color);
                 }
             }
@@ -133,7 +153,11 @@ impl Framebuffer for FBCanvas {
                 for x in rect.min.x..rect.max.x {
                     let u = (x - rect.min.x) as u32;
                     let addr = 3 * (v * width + u);
-                    let color = data[addr as usize].saturating_sub(drift);
+                    let red = data[addr as usize];
+                    let green = data[(addr+1) as usize];
+                    let blue = data[(addr+2) as usize];
+                    let mut color = Color::Rgb(red, green, blue);
+                    color.shift(drift);
                     self.set_pixel(x as u32, y as u32, color);
                 }
             }
@@ -270,7 +294,7 @@ fn main() -> Result<(), Error> {
 
     'outer: loop {
         let mut event_pump = sdl_context.event_pump().unwrap();
-        if let Some(sdl_evt) = event_pump.wait_event_timeout(20) {
+        while let Some(sdl_evt) = event_pump.poll_event() {
             match sdl_evt {
                 SdlEvent::Quit { .. } |
                 SdlEvent::KeyDown { keycode: Some(Keycode::Escape), keymod: Mod::NOMOD, .. } => {
@@ -278,9 +302,18 @@ fn main() -> Result<(), Error> {
                     while let Some(mut view) = history.pop() {
                         view.handle_event(&Event::Back, &tx, &mut VecDeque::new(), &mut RenderQueue::new(), &mut context);
                     }
-                    break;
+                    break 'outer;
                 },
-                SdlEvent::KeyDown { scancode: Some(scancode), keymod, .. } => {
+                SdlEvent::KeyUp { scancode: Some(scancode), keymod: Mod::NOMOD, timestamp, .. } => {
+                    if let Some(code) = code_from_key(scancode) {
+                        ty.send(DeviceEvent::Button {
+                            time: seconds(timestamp),
+                            code,
+                            status: ButtonStatus::Released,
+                        }).ok();
+                    }
+                },
+                SdlEvent::KeyDown { scancode: Some(scancode), keymod, timestamp, repeat, .. } => {
                     match keymod {
                         Mod::NOMOD => {
                             match scancode {
@@ -294,6 +327,21 @@ fn main() -> Result<(), Error> {
                                 },
                                 Scancode::S => {
                                     tx.send(Event::Select(EntryId::TakeScreenshot)).ok();
+                                },
+                                Scancode::B | Scancode::F | Scancode::P | Scancode::L | Scancode::H |
+                                    Scancode::E | Scancode::G => {
+                                    if let Some(code) = code_from_key(scancode) {
+                                        let status = if repeat {
+                                            ButtonStatus::Repeated
+                                        } else {
+                                            ButtonStatus::Pressed
+                                        };
+                                        ty.send(DeviceEvent::Button {
+                                            time: seconds(timestamp),
+                                            code,
+                                            status,
+                                        }).ok();
+                                    }
                                 },
                                 Scancode::I | Scancode::O => {
                                     let mouse_state = MouseState::new(&event_pump);

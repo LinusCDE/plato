@@ -202,7 +202,7 @@ fn scaling_factor(rect: &Rectangle, cropping_margin: &Margin, screen_margin_widt
 
 fn build_pixmap(rect: &Rectangle, doc: &mut dyn Document, location: usize) -> (Pixmap, usize) {
     let scale = scaling_factor(rect, &Margin::default(), 0, doc.dims(location).unwrap(), ZoomMode::FitToPage);
-    doc.pixmap(Location::Exact(location), scale).unwrap()
+    doc.pixmap(Location::Exact(location), scale, CURRENT_DEVICE.color_samples()).unwrap()
 }
 
 fn find_cut(frame: &Rectangle, y_pos: i32, scale: f32, dir: LinearDir, lines: &[BoundedText]) -> Option<i32> {
@@ -304,7 +304,7 @@ impl Reader {
 
             // TODO: use get_or_insert_with?
             if let Some(ref mut r) = info.reader {
-                r.opened = Local::now();
+                r.opened = Local::now().naive_local();
 
                 if r.finished {
                     r.finished = false;
@@ -471,7 +471,7 @@ impl Reader {
         let dims = doc.dims(location).unwrap_or((3.0, 4.0));
         let screen_margin_width = self.view_port.margin_width;
         let scale = scaling_factor(&self.rect, &cropping_margin, screen_margin_width, dims, self.view_port.zoom_mode);
-        if let Some((pixmap, _)) = doc.pixmap(Location::Exact(location), scale) {
+        if let Some((pixmap, _)) = doc.pixmap(Location::Exact(location), scale, CURRENT_DEVICE.color_samples()) {
             let frame = rect![(cropping_margin.left * pixmap.width as f32).ceil() as i32,
                               (cropping_margin.top * pixmap.height as f32).ceil() as i32,
                               ((1.0 - cropping_margin.right) * pixmap.width as f32).floor() as i32,
@@ -480,7 +480,7 @@ impl Reader {
         } else {
             let width = (dims.0 as f32 * scale).max(1.0) as u32;
             let height = (dims.1 as f32 * scale).max(1.0) as u32;
-            let pixmap = Pixmap::empty(width, height);
+            let pixmap = Pixmap::empty(width, height, CURRENT_DEVICE.color_samples());
             let frame = pixmap.rect();
             self.cache.insert(location, Resource { pixmap, frame, scale });
         }
@@ -517,8 +517,10 @@ impl Reader {
                 s.current_page = s.highlights.range(..=location).count().saturating_sub(1);
             }
 
-            self.view_port.page_offset = pt!(0);
             self.current_page = location;
+            self.view_port.page_offset = pt!(0);
+            self.selection = None;
+            self.state = State::Idle;
             self.update(None, hub, rq, context);
             self.update_bottom_bar(rq);
 
@@ -850,6 +852,8 @@ impl Reader {
                 }
 
                 self.current_page = location;
+                self.selection = None;
+                self.state = State::Idle;
                 self.update(None, hub, rq, context);
                 self.update_bottom_bar(rq);
 
@@ -897,8 +901,10 @@ impl Reader {
             }
         }
         if let Some(location) = loc {
-            self.view_port.page_offset = pt!(0, 0);
             self.current_page = location;
+            self.view_port.page_offset = pt!(0, 0);
+            self.selection = None;
+            self.state = State::Idle;
             self.update_results_bar(rq);
             self.update_bottom_bar(rq);
             self.update(None, hub, rq, context);
@@ -1033,11 +1039,10 @@ impl Reader {
     fn update(&mut self, update_mode: Option<UpdateMode>, hub: &Hub, rq: &mut RenderQueue, context: &Context) {
         self.page_turns += 1;
         let update_mode = update_mode.unwrap_or_else(|| {
-            let refresh_rate = if context.fb.inverted() {
-                context.settings.reader.refresh_rate.inverted
-            } else {
-                context.settings.reader.refresh_rate.regular
-            };
+            let pair = context.settings.reader.refresh_rate.by_kind
+                                       .get(&self.info.file.kind)
+                                       .unwrap_or_else(|| &context.settings.reader.refresh_rate.global);
+            let refresh_rate = if context.fb.inverted() { pair.inverted } else { pair.regular };
             if refresh_rate == 0 || self.page_turns % (refresh_rate as usize) != 0 {
                 UpdateMode::Partial
             } else {
@@ -1271,6 +1276,7 @@ impl Reader {
                 rq.add(RenderData::expose(rect, UpdateMode::Gui));
             }
 
+            context.kb_rect = Rectangle::default();
             hub.send(Event::Focus(None)).ok();
         } else {
             if !enable {
@@ -3092,7 +3098,8 @@ impl View for Reader {
                 }
 
                 if let Some(link) = nearest_link.take() {
-                    let pdf_page = Regex::new(r"^#(\d+)(?:,-?\d+,-?\d+)?$").unwrap();
+                    let pdf_page = Regex::new(r"^#page=(\d+).*$").unwrap();
+                    let djvu_page = Regex::new(r"^#([+-])?(\d+)$").unwrap();
                     let toc_page = Regex::new(r"^@(.+)$").unwrap();
                     if let Some(caps) = toc_page.captures(&link.text) {
                         let loc_opt = if caps[1].chars().all(|c| c.is_digit(10)) {
@@ -3110,6 +3117,16 @@ impl View for Reader {
                     } else if let Some(caps) = pdf_page.captures(&link.text) {
                         if let Ok(index) = caps[1].parse::<usize>() {
                             self.go_to_page(index.saturating_sub(1), true, hub, rq, context);
+                        }
+                    } else if let Some(caps) = djvu_page.captures(&link.text) {
+                        if let Ok(mut index) = caps[2].parse::<usize>() {
+                            let prefix = caps.get(1).map(|m| m.as_str());
+                            match prefix {
+                                Some("-") => index = self.current_page.saturating_sub(index),
+                                Some("+") => index += self.current_page,
+                                _ => index = index.saturating_sub(1),
+                            }
+                            self.go_to_page(index, true, hub, rq, context);
                         }
                     } else {
                         let mut doc = self.doc.lock().unwrap();
@@ -3339,16 +3356,15 @@ impl View for Reader {
                                 self.go_to_page(location, true, hub, rq, context);
                             }
                         } else if let Ok(number) = caps[2].parse::<f64>() {
-                            let location = if !self.synthetic {
-                                let mut index = number.max(0.0) as usize;
+                            let location = {
+                                let bpp = if self.synthetic { BYTES_PER_PAGE } else { 1.0 };
+                                let mut index = (number * bpp).max(0.0).round() as usize;
                                 match prefix {
                                     Some("-") => index = self.current_page.saturating_sub(index),
                                     Some("+") => index += self.current_page,
-                                    _ => index = index.saturating_sub(1),
+                                    _ => index = index.saturating_sub(1/(bpp as usize)),
                                 }
                                 index
-                            } else {
-                                (number * BYTES_PER_PAGE).max(0.0).round() as usize
                             };
                             self.go_to_page(location, true, hub, rq, context);
                         }
@@ -3381,7 +3397,7 @@ impl View for Reader {
                             selection: sel,
                             note: note.to_string(),
                             text,
-                            modified: Local::now(),
+                            modified: Local::now().naive_local(),
                         });
                     }
                     if let Some(rect) = self.text_rect(sel) {
@@ -3391,7 +3407,7 @@ impl View for Reader {
                     if let Some(sel) = self.target_annotation.take() {
                         if let Some(annot) = self.find_annotation_mut(sel) {
                             annot.note = note.to_string();
-                            annot.modified = Local::now();
+                            annot.modified = Local::now().naive_local();
                         }
                         if let Some(rect) = self.text_rect(sel) {
                             rq.add(RenderData::new(self.id, rect, UpdateMode::Gui));
@@ -3688,7 +3704,7 @@ impl View for Reader {
                             selection: [sel.start, sel.end],
                             note: String::new(),
                             text,
-                            modified: Local::now(),
+                            modified: Local::now().naive_local(),
                         });
                     }
                     if let Some(rect) = self.text_rect([sel.start, sel.end]) {
@@ -3757,7 +3773,7 @@ impl View for Reader {
             Event::Select(EntryId::RemoveAnnotationNote(sel)) => {
                 if let Some(annot) = self.find_annotation_mut(sel) {
                     annot.note.clear();
-                    annot.modified = Local::now();
+                    annot.modified = Local::now().naive_local();
                     self.update_annotations();
                 }
                 if let Some(rect) = self.text_rect(sel) {
@@ -3884,7 +3900,6 @@ impl View for Reader {
             },
             Event::Select(EntryId::Quit) |
             Event::Select(EntryId::Reboot) |
-            Event::Select(EntryId::RebootInNickel) |
             Event::Back |
             Event::Suspend => {
                 self.quit(context);

@@ -49,6 +49,10 @@ Any 4.*X*.*Y* firmware, with *X* ≥ 6, will do.
 
 ## Supported devices
 
+- *Libra Colour*.
+- *Clara Colour*.
+- *Clara BW*.
+- *Elipsa 2E*.
 - *Clara 2E*.
 - *Libra 2*.
 - *Sage*.
@@ -69,7 +73,7 @@ Any 4.*X*.*Y* firmware, with *X* ≥ 6, will do.
 
 ## Supported formats
 
-- PDF, CBZ, FB2 and XPS via [MuPDF](https://mupdf.com/index.html).
+- PDF, CBZ, FB2, MOBI, XPS and TXT via [MuPDF](https://mupdf.com/index.html).
 - ePUB through a built-in renderer.
 - DJVU via [DjVuLibre](http://djvu.sourceforge.net/index.html).
 

@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 version=$(cargo pkgid -p plato | cut -d '#' -f 2)
 archive="plato-${version}.zip"

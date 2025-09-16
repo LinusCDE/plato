@@ -1,11 +1,12 @@
 use std::ptr;
 use std::path::Path;
-use std::io;
+use std::io::{self, Write};
 use std::fs::{OpenOptions, File};
 use std::slice;
 use std::os::unix::io::AsRawFd;
 use std::ops::Drop;
 use anyhow::{Error, Context};
+use crate::color::Color;
 use crate::geom::Rectangle;
 use crate::device::{CURRENT_DEVICE, Model};
 use super::{UpdateMode, Framebuffer};
@@ -32,16 +33,20 @@ type AsRgb = fn(&KoboFramebuffer1) -> Vec<u8>;
 pub struct KoboFramebuffer1 {
     file: File,
     frame: *mut libc::c_void,
-    frame_size: libc::size_t,
+    frame_size: libc::size_t, 
     token: u32,
     flags: u32,
     monochrome: bool,
     refresh_quality: RefreshQuality,
     dithered: bool,
+    inverted: bool,
     transform: ColorTransform,
     set_pixel_rgb: SetPixelRgb,
     get_pixel_rgb: GetPixelRgb,
     as_rgb: AsRgb,
+    red_index: usize,
+    green_index: usize,
+    blue_index: usize,
     bytes_per_pixel: u8,
     var_info: VarScreenInfo,
     fix_info: FixScreenInfo,
@@ -78,6 +83,7 @@ impl KoboFramebuffer1 {
             } else {
                 (set_pixel_rgb_8, get_pixel_rgb_8, as_rgb_8)
             };
+            let red_index = if var_info.red.offset > 0 { 2 } else { 0 };
             Ok(KoboFramebuffer1 {
                    file,
                    frame,
@@ -87,10 +93,14 @@ impl KoboFramebuffer1 {
                    monochrome: false,
                    refresh_quality: RefreshQuality::Normal,
                    dithered: false,
+                   inverted: false,
                    transform: transform_identity,
                    set_pixel_rgb,
                    get_pixel_rgb,
                    as_rgb,
+                   red_index,
+                   green_index: 1,
+                   blue_index: 2 - red_index,
                    bytes_per_pixel: bytes_per_pixel as u8,
                    var_info,
                    fix_info,
@@ -112,29 +122,28 @@ impl Framebuffer for KoboFramebuffer1 {
         self.refresh_quality = quality;
     }
 
-    fn set_pixel(&mut self, x: u32, y: u32, color: u8) {
+    fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
         let c = (self.transform)(x, y, color);
-        (self.set_pixel_rgb)(self, x, y, [c, c, c]);
+        (self.set_pixel_rgb)(self, x, y, c.rgb());
     }
 
-    fn set_blended_pixel(&mut self, x: u32, y: u32, color: u8, alpha: f32) {
+    fn set_blended_pixel(&mut self, x: u32, y: u32, color: Color, alpha: f32) {
         if alpha >= 1.0 {
             self.set_pixel(x, y, color);
             return;
         }
-        let rgb = (self.get_pixel_rgb)(self, x, y);
-        let color_alpha = color as f32 * alpha;
-        let interp = (color_alpha + (1.0 - alpha) * rgb[0] as f32) as u8;
+        let background = Color::from_rgb(&(self.get_pixel_rgb)(self, x, y));
+        let interp = background.lerp(color, alpha);
         let c = (self.transform)(x, y, interp);
-        (self.set_pixel_rgb)(self, x, y, [c, c, c]);
+        (self.set_pixel_rgb)(self, x, y, c.rgb());
     }
 
     fn invert_region(&mut self, rect: &Rectangle) {
         for y in rect.min.y..rect.max.y {
             for x in rect.min.x..rect.max.x {
                 let rgb = (self.get_pixel_rgb)(self, x as u32, y as u32);
-                let color = 255 - rgb[0];
-                (self.set_pixel_rgb)(self, x as u32, y as u32, [color, color, color]);
+                let color = [255 - rgb[0], 255 - rgb[1], 255 - rgb[2]];
+                (self.set_pixel_rgb)(self, x as u32, y as u32, color);
             }
         }
     }
@@ -143,8 +152,8 @@ impl Framebuffer for KoboFramebuffer1 {
         for y in rect.min.y..rect.max.y {
             for x in rect.min.x..rect.max.x {
                 let rgb = (self.get_pixel_rgb)(self, x as u32, y as u32);
-                let color = rgb[0].saturating_sub(drift);
-                (self.set_pixel_rgb)(self, x as u32, y as u32, [color, color, color]);
+                let color = [rgb[0].saturating_sub(drift), rgb[1].saturating_sub(drift), rgb[2].saturating_sub(drift)];
+                (self.set_pixel_rgb)(self, x as u32, y as u32, color);
             }
         }
     }
@@ -153,13 +162,19 @@ impl Framebuffer for KoboFramebuffer1 {
     fn update(&mut self, rect: &Rectangle, mode: UpdateMode) -> Result<u32, Error> {
         let update_marker = self.token;
         let mark = CURRENT_DEVICE.mark();
+        let color_samples = CURRENT_DEVICE.color_samples();
         let mut flags = self.flags;
         let mut monochrome = self.monochrome;
+        let mut dithered = self.dithered;
 
         let (update_mode, mut waveform_mode) = match mode {
             UpdateMode::Gui => (UPDATE_MODE_PARTIAL, WAVEFORM_MODE_AUTO),
             UpdateMode::Partial => {
-                if mark >= 7 {
+                if mark >= 12 && color_samples > 1 && dithered {
+                    (UPDATE_MODE_FULL, HWTCON_WAVEFORM_MODE_GLRC16)
+                } else if mark >= 11 {
+                    (UPDATE_MODE_PARTIAL, HWTCON_WAVEFORM_MODE_GLR16)
+                } else if mark >= 7 {
                     (UPDATE_MODE_PARTIAL, NTX_WFM_MODE_GLR16)
                 } else if CURRENT_DEVICE.model == Model::Aura {
                     flags |= EPDC_FLAG_USE_AAD;
@@ -170,41 +185,90 @@ impl Framebuffer for KoboFramebuffer1 {
             },
             UpdateMode::Full => {
                 monochrome = false;
-                (UPDATE_MODE_FULL, NTX_WFM_MODE_GC16)
+                if mark >= 12 && color_samples > 1 && dithered {
+                    (UPDATE_MODE_FULL, HWTCON_WAVEFORM_MODE_GCC16)
+                } else {
+                    (UPDATE_MODE_FULL, NTX_WFM_MODE_GC16)
+                }
             },
-            UpdateMode::Fast => (UPDATE_MODE_PARTIAL, NTX_WFM_MODE_A2),
+            UpdateMode::Fast => {
+                if mark >= 11 {
+                    (UPDATE_MODE_PARTIAL, HWTCON_WAVEFORM_MODE_A2)
+                } else {
+                    (UPDATE_MODE_PARTIAL, NTX_WFM_MODE_A2)
+                }
+            },
             UpdateMode::FastMono => {
-                flags |= EPDC_FLAG_FORCE_MONOCHROME;
-                (UPDATE_MODE_PARTIAL, NTX_WFM_MODE_A2)
+                if mark >= 11 {
+                    flags |= HWTCON_FLAG_FORCE_A2_OUTPUT;
+                    (UPDATE_MODE_PARTIAL, HWTCON_WAVEFORM_MODE_A2)
+                } else {
+                    flags |= EPDC_FLAG_FORCE_MONOCHROME;
+                    (UPDATE_MODE_PARTIAL, NTX_WFM_MODE_A2)
+                }
             },
         };
 
         if monochrome {
-            if mark >= 7 {
+            if mark >= 11 {
+                if waveform_mode != HWTCON_WAVEFORM_MODE_A2 {
+                    waveform_mode = NTX_WFM_MODE_DU;
+                    dithered = true;
+                }
+            } else if mark >= 7 {
                 if waveform_mode != NTX_WFM_MODE_A2 {
                     waveform_mode = NTX_WFM_MODE_DU;
-                    if !self.dithered {
-                        flags |= EPDC_FLAG_USE_DITHERING_Y1;
-                    }
+                    dithered = true;
                 }
             } else {
                 waveform_mode = NTX_WFM_MODE_A2;
             }
         }
 
-        if mark >= 9 && flags & EPDC_FLAG_ENABLE_INVERSION != 0 {
-            if waveform_mode == NTX_WFM_MODE_GLR16 {
-                waveform_mode = NTX_WFM_MODE_GLKW16;
-            } else if waveform_mode == NTX_WFM_MODE_GC16 {
-                waveform_mode = NTX_WFM_MODE_GCK16;
+        if self.inverted {
+            if mark >= 11 {
+                if waveform_mode == HWTCON_WAVEFORM_MODE_GLR16 {
+                    waveform_mode = HWTCON_WAVEFORM_MODE_GLKW16;
+                } else if waveform_mode == NTX_WFM_MODE_GC16 {
+                    waveform_mode = HWTCON_WAVEFORM_MODE_GCK16;
+                }
+            } else if mark >= 9 {
+                if waveform_mode == NTX_WFM_MODE_GLR16 {
+                    waveform_mode = NTX_WFM_MODE_GLKW16;
+                } else if waveform_mode == NTX_WFM_MODE_GC16 {
+                    waveform_mode = NTX_WFM_MODE_GCK16;
+                }
             }
         }
 
-        let result = if mark >= 7 {
+        let result = if mark >= 11 {
+            let mut dither_mode = 0;
+
+            if dithered {
+                flags |= HWTCON_FLAG_USE_DITHERING;
+                if monochrome {
+                    dither_mode = HWTCON_FLAG_USE_DITHERING_Y8_Y1_S
+                } else {
+                    dither_mode = HWTCON_FLAG_USE_DITHERING_Y8_Y4_S;
+                }
+            }
+
+            let update_data = HwtConUpdateData {
+                update_region: (*rect).into(),
+                waveform_mode,
+                update_mode,
+                update_marker,
+                flags,
+                dither_mode,
+            };
+            unsafe {
+                send_update_v3(self.file.as_raw_fd(), &update_data)
+            }
+        } else if mark >= 7 {
             let mut quant_bit = 0;
             let mut dither_mode = EPDC_FLAG_USE_DITHERING_PASSTHROUGH;
 
-            if self.dithered {
+            if dithered {
                 if monochrome {
                     flags |= EPDC_FLAG_USE_DITHERING_Y1;
                 } else if mode == UpdateMode::Partial || mode == UpdateMode::Full {
@@ -212,7 +276,6 @@ impl Framebuffer for KoboFramebuffer1 {
                     quant_bit = 7;
                 }
             }
-
 
             let update_data = MxcfbUpdateDataV2 {
                 update_region: (*rect).into(),
@@ -229,7 +292,7 @@ impl Framebuffer for KoboFramebuffer1 {
                 send_update_v2(self.file.as_raw_fd(), &update_data)
             }
         } else {
-            if monochrome && !self.dithered {
+            if monochrome && !dithered {
                 flags |= EPDC_FLAG_FORCE_MONOCHROME;
             }
 
@@ -324,15 +387,28 @@ impl Framebuffer for KoboFramebuffer1 {
     }
 
     fn set_inverted(&mut self, enable: bool) {
-        if enable {
-            self.flags |= EPDC_FLAG_ENABLE_INVERSION;
+        if self.inverted == enable {
+            return;
+        }
+        self.inverted = enable;
+        if CURRENT_DEVICE.mark() < 11 {
+            if enable {
+                self.flags |= EPDC_FLAG_ENABLE_INVERSION;
+            } else {
+                self.flags &= !EPDC_FLAG_ENABLE_INVERSION;
+            }
         } else {
-            self.flags &= !EPDC_FLAG_ENABLE_INVERSION;
+            OpenOptions::new()
+            .read(false)
+            .write(true)
+            .open("/proc/hwtcon/cmd").and_then(|mut file| {
+                file.write_all(if enable { b"night_mode 4" } else { b"night_mode 0" })
+            }).map_err(|e| eprintln!("Failed to invert colors: {:#?}", e)).ok();
         }
     }
 
     fn inverted(&self) -> bool {
-        self.flags & EPDC_FLAG_ENABLE_INVERSION != 0
+        self.inverted
     }
 
     fn set_monochrome(&mut self, enable: bool) {
@@ -413,10 +489,10 @@ fn set_pixel_rgb_32(fb: &mut KoboFramebuffer1, x: u32, y: u32, rgb: [u8; 3]) {
 
     unsafe {
         let spot = fb.frame.offset(addr) as *mut u8;
-        *spot.offset(0) = rgb[2];
-        *spot.offset(1) = rgb[1];
-        *spot.offset(2) = rgb[0];
-        // *spot.offset(3) = 0x00;
+        *spot.offset(0) = rgb[fb.red_index];
+        *spot.offset(1) = rgb[fb.green_index];
+        *spot.offset(2) = rgb[fb.blue_index];
+        // *spot.offset(3) = 0xFF;
     }
 }
 
@@ -445,7 +521,9 @@ fn get_pixel_rgb_32(fb: &KoboFramebuffer1, x: u32, y: u32) -> [u8; 3] {
                (fb.var_info.yoffset as isize + y as isize) * (fb.fix_info.line_length as isize);
     unsafe {
         let spot = fb.frame.offset(addr) as *mut u8;
-        [*spot.offset(2), *spot.offset(1), *spot.offset(0)]
+        [*spot.offset(fb.red_index as isize),
+         *spot.offset(fb.green_index as isize),
+         *spot.offset(fb.blue_index as isize)]
     }
 }
 
@@ -479,13 +557,13 @@ fn as_rgb_16(fb: &KoboFramebuffer1) -> Vec<u8> {
 fn as_rgb_32(fb: &KoboFramebuffer1) -> Vec<u8> {
     let (width, height) = fb.dims();
     let mut rgb888 = Vec::with_capacity((width * height * 3) as usize);
-    let bgra8888 = fb.as_bytes();
+    let data = fb.as_bytes();
     let virtual_width = fb.var_info.xres_virtual as usize;
-    for (_, bgra) in bgra8888.chunks(4).take(height as usize * virtual_width).enumerate()
-                           .filter(|&(i, _)| i % virtual_width < width as usize) {
-        let red = bgra[2];
-        let green = bgra[1];
-        let blue = bgra[0];
+    for (_, color) in data.chunks(4).take(height as usize * virtual_width).enumerate()
+                          .filter(|&(i, _)| i % virtual_width < width as usize) {
+        let red = color[fb.red_index];
+        let green = color[fb.green_index];
+        let blue = color[fb.blue_index];
         rgb888.extend_from_slice(&[red, green, blue]);
     }
     rgb888

@@ -19,6 +19,7 @@ use anyhow::{Error, format_err};
 use thiserror::Error;
 use globset::Glob;
 use walkdir::WalkDir;
+use crate::color::Color;
 use crate::geom::{Point, Vec2};
 use crate::helpers::IsHidden;
 use crate::framebuffer::Framebuffer;
@@ -540,6 +541,7 @@ impl Fonts {
 }
 
 bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Variant: u8 {
         const REGULAR = 0;
         const ITALIC = 1;
@@ -763,7 +765,7 @@ unsafe fn font_data_from_script(script: HbScript) -> &'static [libc::c_uchar] {
         HB_SCRIPT_BOPOMOFO |
         HB_SCRIPT_HAN => &_binary_resources_fonts_droid_DroidSansFallback_ttf_start,
 
-        HB_SCRIPT_ARABIC => &_binary_resources_fonts_noto_NotoNaskhArabic_Regular_ttf_start,
+        HB_SCRIPT_ARABIC => &_binary_resources_fonts_noto_NotoNaskhArabic_Regular_otf_start,
         HB_SCRIPT_SYRIAC => &_binary_resources_fonts_noto_NotoSansSyriac_Regular_otf_start,
         HB_SCRIPT_MEROITIC_CURSIVE |
         HB_SCRIPT_MEROITIC_HIEROGLYPHS => &_binary_resources_fonts_noto_NotoSansMeroitic_Regular_otf_start,
@@ -1509,7 +1511,7 @@ impl Font {
         (i, width)
     }
 
-    pub fn render(&mut self, fb: &mut dyn Framebuffer, color: u8, render_plan: &RenderPlan, origin: Point) {
+    pub fn render(&mut self, fb: &mut dyn Framebuffer, color: Color, render_plan: &RenderPlan, origin: Point) {
         unsafe {
             let mut pos = origin;
             let mut fallback_faces = FxHashMap::default();

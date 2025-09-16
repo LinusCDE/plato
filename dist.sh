@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 [ -d dist ] && rm -Rf dist
 
@@ -10,7 +10,7 @@ ARMV7_PLATO_BINARY="target/armv7-unknown-linux-gnueabihf/release/plato"
 [ -e $ARM_PLATO_BINARY -o -e $ARMV7_PLATO_BINARY ] || ./build.sh
 
 # Santity check to prevent later potential problems
-if [ -e $ARM_PLATO_BINARY -a -e $ARMV7_PLATO_BINARY ];
+if [ -e $ARM_PLATO_BINARY -a -e $ARMV7_PLATO_BINARY ]; then
   echo "Error: Found a plato binary for both arm AND armv7. This can lead to the wrong binary being used unexpectedly. Please delete one of them." >&2
   exit 1
 fi

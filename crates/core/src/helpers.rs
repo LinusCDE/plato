@@ -1,4 +1,3 @@
-use std::io;
 use std::char;
 use std::fmt;
 use std::str::FromStr;
@@ -6,6 +5,7 @@ use std::borrow::Cow;
 use std::time::SystemTime;
 use std::num::ParseIntError;
 use std::fs::{self, File, Metadata};
+use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf, Component};
 use fxhash::FxHashMap;
 use std::ops::{Deref, DerefMut};
@@ -69,7 +69,8 @@ pub fn decode_entities(text: &str) -> Cow<str> {
 pub fn load_json<T, P: AsRef<Path>>(path: P) -> Result<T, Error> where for<'a> T: Deserialize<'a> {
     let file = File::open(path.as_ref())
                     .with_context(|| format!("can't open file {}", path.as_ref().display()))?;
-    serde_json::from_reader(file)
+    let reader = BufReader::new(file);
+    serde_json::from_reader(reader)
                .with_context(|| format!("can't parse JSON from {}", path.as_ref().display()))
                .map_err(Into::into)
 }
@@ -77,7 +78,8 @@ pub fn load_json<T, P: AsRef<Path>>(path: P) -> Result<T, Error> where for<'a> T
 pub fn save_json<T, P: AsRef<Path>>(data: &T, path: P) -> Result<(), Error> where T: Serialize {
     let file = File::create(path.as_ref())
                     .with_context(|| format!("can't create file {}", path.as_ref().display()))?;
-    serde_json::to_writer_pretty(file, data)
+    let writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, data)
                .with_context(|| format!("can't serialize to JSON file {}", path.as_ref().display()))
                .map_err(Into::into)
 }
@@ -212,19 +214,20 @@ impl AsciiExtension for char {
 }
 
 pub mod datetime_format {
-    use chrono::{DateTime, Local, TimeZone};
+    use chrono::NaiveDateTime;
     use serde::{self, Deserialize, Serializer, Deserializer};
 
     pub const FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
-    pub fn serialize<S>(date: &DateTime<Local>, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    pub fn serialize<S>(date: &NaiveDateTime, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
         let s = format!("{}", date.format(FORMAT));
         serializer.serialize_str(&s)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Local>, D::Error> where D: Deserializer<'de> {
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<NaiveDateTime, D::Error> where D: Deserializer<'de> {
         let s = String::deserialize(deserializer)?;
-        Local.datetime_from_str(&s, FORMAT).map_err(serde::de::Error::custom)
+        NaiveDateTime::parse_from_str(&s, FORMAT)
+                     .map_err(serde::de::Error::custom)
     }
 }
 

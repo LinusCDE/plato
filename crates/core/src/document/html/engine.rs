@@ -126,9 +126,7 @@ impl Engine {
     }
 
     pub fn set_margin_width(&mut self, width: i32) {
-        if width >= 0 && width <= 10 {
-            self.margin = Edge::uniform(mm_to_px(width as f32, self.dpi).round() as i32);
-        }
+        self.margin = Edge::uniform(mm_to_px(width as f32, self.dpi).round() as i32);
     }
 
     pub fn set_line_height(&mut self, line_height: f32) {
@@ -433,6 +431,7 @@ impl Engine {
                 } else {
                     let mut iter = node.children().filter(|child| child.is_element()).peekable();
                     inner_loop_context.is_first = true;
+                    let is_list_item = node.tag_name() == Some("li");
                     let mut index = 0;
 
                     while let Some(child) = iter.next() {
@@ -442,7 +441,7 @@ impl Engine {
 
                         inner_loop_context.index = index;
 
-                        if child.is_wrapper() {
+                        if is_list_item || child.is_wrapper() {
                             inner_loop_context.index = loop_context.index;
                         }
 
@@ -487,11 +486,8 @@ impl Engine {
                 if !inlines.is_empty() {
                     draw_state.prefix = match style.list_style_type {
                         None => {
-                            let parent = if node.is_wrapper() {
-                                node.ancestor_elements().nth(1)
-                            } else {
-                                node.parent_element()
-                            };
+                            let parent = node.ancestor_elements()
+                                             .find(|n| matches!(n.tag_name(), Some("ul"|"ol")));
                             match parent.and_then(|parent| parent.tag_name()) {
                                 Some("ul") => format_list_prefix(ListStyleType::Disc, loop_context.index),
                                 Some("ol") => format_list_prefix(ListStyleType::Decimal, loop_context.index),
@@ -518,7 +514,7 @@ impl Engine {
         }
 
         // Collapse top and bottom margins of empty blocks.
-        if rects.is_empty() {
+        if rects.is_empty() || rects == [None] {
             style.margin.bottom = collapse_margins(style.margin.bottom, style.margin.top);
             style.margin.top = 0;
         }
@@ -945,7 +941,15 @@ impl Engine {
                                 } else if end_index < text.len() {
                                     let penalty = if c == '-' { self.hyphen_penalty } else { 0 };
                                     let flagged = penalty > 0;
-                                    items.push(ParagraphItem::Penalty { width: 0, penalty, flagged });
+                                    if matches!(parent_style.text_align, TextAlign::Justify | TextAlign::Center) {
+                                        items.push(ParagraphItem::Penalty { width: 0, penalty, flagged });
+                                    } else {
+                                        let stretch = 3 * space_plan.glyph_advance(0);
+                                        items.push(ParagraphItem::Penalty { width: 0, penalty: INFINITE_PENALTY, flagged: false });
+                                        items.push(ParagraphItem::Glue { width: 0, stretch, shrink: 0 });
+                                        items.push(ParagraphItem::Penalty { width: 0, penalty: 10*penalty, flagged: true });
+                                        items.push(ParagraphItem::Glue { width: 0, stretch: -stretch, shrink: 0 });
+                                    }
                                 }
                             }
                             start_index += chunk.len();
@@ -1006,11 +1010,6 @@ impl Engine {
             style.text_indent
         };
 
-        let stretch_tolerance = if style.text_align == TextAlign::Justify {
-            self.stretch_tolerance
-        } else {
-            10.0
-        };
         let (ascender, descender) = {
             let fonts = self.fonts.as_mut().unwrap();
             let font = fonts.get_mut(style.font_kind, style.font_style, style.font_weight);
@@ -1120,25 +1119,21 @@ impl Engine {
         let mut line_lengths: Vec<i32> = para_shape.iter().map(|(a, b)| b - a).collect();
         line_lengths[0] -= text_indent;
 
-        let mut bps = total_fit(&items, &line_lengths, stretch_tolerance, 0);
+        let mut bps = total_fit(&items, &line_lengths, self.stretch_tolerance, 0);
 
         let mut hyph_indices = Vec::new();
         let mut glue_drifts = Vec::new();
 
-        if bps.is_empty() {
-            let dictionary = if style.text_align == TextAlign::Justify {
-                hyph_lang(style.language.as_ref().map_or(DEFAULT_HYPH_LANG, String::as_str))
-                         .and_then(|lang| HYPHENATION_PATTERNS.get(&lang))
-            } else {
-                None
-            };
-
-            items = self.hyphenate_paragraph(dictionary, items, &mut hyph_indices);
-            bps = total_fit(&items, &line_lengths, stretch_tolerance, 0);
+        if bps.is_empty() && style.text_align != TextAlign::Center {
+            if let Some(dictionary) = hyph_lang(style.language.as_ref().map_or(DEFAULT_HYPH_LANG, String::as_str))
+                                               .and_then(|lang| HYPHENATION_PATTERNS.get(&lang)) {
+                items = self.hyphenate_paragraph(style, dictionary, items, &mut hyph_indices);
+                bps = total_fit(&items, &line_lengths, self.stretch_tolerance, 0);
+            }
         }
 
         if bps.is_empty() {
-            bps = standard_fit(&items, &line_lengths, stretch_tolerance);
+            bps = standard_fit(&items, &line_lengths, self.stretch_tolerance);
         }
 
         if bps.is_empty() {
@@ -1345,7 +1340,7 @@ impl Engine {
                                             display_list.push(page);
                                             let next_baseline = (root_data.rect.min.y + space_top - ascender + element.height).min(y_max);
                                             for dc in &mut start_commands {
-                                                for pt in dc.position_mut() {
+                                                if let Some(pt) = dc.position_mut() {
                                                     pt.y += next_baseline - position.y;
                                                 }
                                             }
@@ -1354,7 +1349,7 @@ impl Engine {
                                             page = start_commands;
                                         } else {
                                             for dc in &mut page[start_command_index..] {
-                                                for pt in dc.position_mut() {
+                                                if let Some(pt) = dc.position_mut() {
                                                     pt.y += delta;
                                                 }
                                             }
@@ -1415,17 +1410,14 @@ impl Engine {
 
             if let ParagraphItem::Penalty { width, .. } = items[index] {
                 if width > 0 {
-                    let font_size = (style.font_size * 64.0) as u32;
-                    let mut hyphen_plan = {
+                    if let Some(DrawCommand::Text(tc)) = page.last_mut() {
                         let font = self.fonts.as_mut().unwrap()
-                                       .get_mut(style.font_kind, style.font_style, style.font_weight);
-                        font.set_size(font_size, self.dpi);
-                        font.plan("-", None, style.font_features.as_deref())
-                    };
-                    if let Some(DrawCommand::Text(TextCommand { ref mut rect, ref mut plan, ref mut text, .. })) = page.last_mut() {
-                        rect.max.x += hyphen_plan.width;
-                        plan.append(&mut hyphen_plan);
-                        text.push('\u{00AD}');
+                                       .get_mut(tc.font_kind, tc.font_style, tc.font_weight);
+                        font.set_size(tc.font_size, self.dpi);
+                        let mut hyphen_plan = font.plan("-", None, None);
+                        tc.rect.max.x += hyphen_plan.width;
+                        tc.plan.append(&mut hyphen_plan);
+                        tc.text.push('\u{00AD}');
                     }
                 }
             }
@@ -1497,69 +1489,72 @@ impl Engine {
         }
     }
 
-    fn hyphenate_paragraph(&mut self, dictionary: Option<&Standard>, items: Vec<ParagraphItem<ParagraphElement>>, hyph_indices: &mut Vec<[usize; 2]>) -> Vec<ParagraphItem<ParagraphElement>> {
+    fn hyphenate_paragraph(&mut self, style: &StyleData, dictionary: &Standard, items: Vec<ParagraphItem<ParagraphElement>>, hyph_indices: &mut Vec<[usize; 2]>) -> Vec<ParagraphItem<ParagraphElement>> {
         let mut hyph_items = Vec::with_capacity(items.len());
 
         for itm in items {
             match itm {
                 ParagraphItem::Box { data: ParagraphElement::Text(ref element), .. } => {
                     let text = &element.text;
-                    let hyphen_width = if dictionary.is_some() {
+                    let (hyphen_width, stretch) = {
                         let font = self.fonts.as_mut().unwrap()
                                        .get_mut(element.font_kind, element.font_style, element.font_weight);
                         font.set_size(element.font_size, self.dpi);
-                        font.plan("-", None, element.font_features.as_deref()).width
-                    } else {
-                        0
+                        let plan = font.plan(" -", None, element.font_features.as_deref());
+                        (plan.glyph_advance(1), 3 * plan.glyph_advance(0))
                     };
 
-                    if let Some(dict) = dictionary {
-                        let mut index_before = text.find(char::is_alphabetic).unwrap_or_else(|| text.len());
-                        if index_before > 0 {
-                            let subelem = self.box_from_chunk(&text[0..index_before],
-                                                              0,
+                    let mut index_before = text.find(char::is_alphabetic).unwrap_or_else(|| text.len());
+                    if index_before > 0 {
+                        let subelem = self.box_from_chunk(&text[0..index_before],
+                                                          0,
+                                                          element);
+                        hyph_items.push(subelem);
+                    }
+
+                    let mut index_after = text[index_before..].find(|c: char| !c.is_alphabetic())
+                                                              .map(|i| index_before + i)
+                                                              .unwrap_or_else(|| text.len());
+                    while index_before < index_after {
+                        let mut index = 0;
+                        let chunk = &text[index_before..index_after];
+                        let len_before = hyph_items.len();
+
+                        for segment in dictionary.hyphenate(chunk).iter().segments() {
+                            let subelem = self.box_from_chunk(segment,
+                                                              index_before + index,
                                                               element);
+                            hyph_items.push(subelem);
+                            index += segment.len();
+                            if index < chunk.len() {
+                                if style.text_align == TextAlign::Justify {
+                                    hyph_items.push(ParagraphItem::Penalty { width: hyphen_width, penalty: self.hyphen_penalty, flagged: true });
+                                } else {
+                                    hyph_items.push(ParagraphItem::Penalty { width: 0, penalty: INFINITE_PENALTY, flagged: false });
+                                    hyph_items.push(ParagraphItem::Glue { width: 0, stretch, shrink: 0 });
+                                    hyph_items.push(ParagraphItem::Penalty { width: hyphen_width, penalty: 10*self.hyphen_penalty, flagged: true });
+                                    hyph_items.push(ParagraphItem::Glue { width: 0, stretch: -stretch, shrink: 0 });
+                                }
+                            }
+                        }
+
+                        let len_after = hyph_items.len();
+                        if len_after > 1 + len_before {
+                            hyph_indices.push([len_before, len_after]);
+                        }
+                        index_before = text[index_after..].find(char::is_alphabetic)
+                                                           .map(|i| index_after + i)
+                                                           .unwrap_or_else(|| text.len());
+                        if index_before > index_after {
+                            let subelem = self.box_from_chunk(&text[index_after..index_before],
+                                                              index_after,
+                                                              &element);
                             hyph_items.push(subelem);
                         }
 
-                        let mut index_after = text[index_before..].find(|c: char| !c.is_alphabetic())
-                                                                  .map(|i| index_before + i)
-                                                                  .unwrap_or_else(|| text.len());
-                        while index_before < index_after {
-                            let mut index = 0;
-                            let chunk = &text[index_before..index_after];
-                            let len_before = hyph_items.len();
-                            for segment in dict.hyphenate(chunk).iter().segments() {
-                                let subelem = self.box_from_chunk(segment,
-                                                                  index_before + index,
-                                                                  element);
-                                hyph_items.push(subelem);
-                                index += segment.len();
-                                if index < chunk.len() {
-                                    hyph_items.push(ParagraphItem::Penalty { width: hyphen_width, penalty: self.hyphen_penalty, flagged: true });
-                                }
-                            }
-                            let len_after = hyph_items.len();
-                            if len_after > 1 + len_before {
-                                hyph_indices.push([len_before, len_after]);
-                            }
-                            index_before = text[index_after..].find(char::is_alphabetic)
-                                                               .map(|i| index_after + i)
-                                                               .unwrap_or_else(|| text.len());
-                            if index_before > index_after {
-                                let subelem = self.box_from_chunk(&text[index_after..index_before],
-                                                                  index_after,
-                                                                  &element);
-                                hyph_items.push(subelem);
-                            }
-
-                            index_after = text[index_before..].find(|c: char| !c.is_alphabetic())
-                                                               .map(|i| index_before + i)
-                                                               .unwrap_or_else(|| text.len());
-                        }
-                    } else {
-                        let subelem = self.box_from_chunk(text, 0, element);
-                        hyph_items.push(subelem);
+                        index_after = text[index_before..].find(|c: char| !c.is_alphabetic())
+                                                           .map(|i| index_before + i)
+                                                           .unwrap_or_else(|| text.len());
                     }
                 },
                 _ => { hyph_items.push(itm) },
@@ -1614,7 +1609,13 @@ impl Engine {
 
                 line_stats = LineStats::default();
                 merged_items.push(itm);
+                if i >= start_index && i < end_index {
+                    start_index = i + 1;
+                }
             } else if i >= start_index && i < end_index {
+                if i > start_index {
+                    index_drift += 1;
+                }
                 if let ParagraphItem::Box { width, data } = itm {
                     match merged_element {
                         ParagraphElement::Text(TextElement { ref mut text, .. }) => {
@@ -1629,8 +1630,6 @@ impl Engine {
                     if !line_stats.started {
                         line_stats.started = true;
                     }
-                } else {
-                    index_drift += 2;
                 }
                 if i == end_index - 1 {
                     j += 1;
@@ -1670,10 +1669,10 @@ impl Engine {
         merged_items
     }
 
-    pub fn render_page(&mut self, page: &[DrawCommand], scale_factor: f32, resource_fetcher: &mut dyn ResourceFetcher) -> Option<Pixmap> {
+    pub fn render_page(&mut self, page: &[DrawCommand], scale_factor: f32, samples: usize, resource_fetcher: &mut dyn ResourceFetcher) -> Option<Pixmap> {
         let width = (self.dims.0 as f32 * scale_factor) as u32;
         let height = (self.dims.1 as f32 * scale_factor) as u32;
-        let mut fb = Pixmap::try_new(width, height)?;
+        let mut fb = Pixmap::try_new(width, height, samples)?;
 
         for dc in page {
             match dc {
@@ -1694,7 +1693,7 @@ impl Engine {
                         if let Some((pixmap, _)) = PdfOpener::new().and_then(|opener| {
                             opener.open_memory(path, &buf)
                         }).and_then(|mut doc| {
-                            doc.pixmap(Location::Exact(0), scale_factor * *scale)
+                            doc.pixmap(Location::Exact(0), scale_factor * *scale, samples)
                         }) {
                             let position = Point::from(scale_factor * Vec2::from(*position));
                             fb.draw_pixmap(&pixmap, position);

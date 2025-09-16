@@ -1,4 +1,3 @@
-use std::env;
 use std::sync::mpsc;
 use chrono::Local;
 use crate::device::CURRENT_DEVICE;
@@ -88,7 +87,7 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                         EntryKind::Command("Calculator".to_string(),
                                            EntryId::Launch(AppCmd::Calculator)),
                         EntryKind::Command("Sketch".to_string(),
-                        EntryId::Launch(AppCmd::Sketch)),
+                                           EntryId::Launch(AppCmd::Sketch)),
                         EntryKind::Separator,
                         EntryKind::Command("Touch Events".to_string(),
                                            EntryId::Launch(AppCmd::TouchEvents)),
@@ -133,7 +132,12 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
         }
 
 
-        let mut entries = vec![/*EntryKind::CheckBox("Invert Colors".to_string(),
+        let mut entries = vec![EntryKind::Command("About".to_string(),
+                                                   EntryId::About),
+                               EntryKind::Command("System Info".to_string(),
+                                                   EntryId::SystemInfo),
+                               EntryKind::Separator,
+                               /*EntryKind::CheckBox("Invert Colors".to_string(),
                                                    EntryId::ToggleInverted,
                                                    context.fb.inverted()),
                                EntryKind::CheckBox("Make Bitonal".to_string(),
@@ -154,30 +158,18 @@ pub fn toggle_main_menu(view: &mut dyn View, rect: Rectangle, enable: Option<boo
                                                    EntryId::TakeScreenshot),
                                EntryKind::Separator,
                                EntryKind::SubMenu("Applications".to_string(), apps),
-                               EntryKind::Separator,
-                               EntryKind::Command("About".to_string(),
-                                                  EntryId::About),
-                               EntryKind::Command("System Info".to_string(),
-                                                  EntryId::SystemInfo),
-                                                ];
+        ];
 
-        if env::var_os("PLATO_STANDALONE").is_some() {
-            entries.push(EntryKind::Command("Reboot in Nickel".to_string(), EntryId::RebootInNickel));
-            entries.push(EntryKind::Command("Reboot".to_string(), EntryId::Reboot));
-        } else {
-
-            let system_entries = vec![
-                EntryKind::Command("Power off".to_string(), EntryId::PowerOff),
-                EntryKind::Command("Reboot".to_string(), EntryId::Reboot),
-            ];
-            entries.push(EntryKind::SubMenu("System".to_string(), system_entries));
-            if ! context.killed_xochitl {
-                entries.push(EntryKind::Command("Quit".to_string(), EntryId::Quit));
-            }else {
-                entries.push(EntryKind::Command("Quit to Xochitl".to_string(), EntryId::QuitToXochitl));
-            }
+        let system_entries = vec![
+            EntryKind::Command("Power off".to_string(), EntryId::PowerOff),
+            EntryKind::Command("Reboot".to_string(), EntryId::Reboot),
+        ];
+        entries.push(EntryKind::SubMenu("System".to_string(), system_entries));
+        if ! context.killed_xochitl {
+            entries.push(EntryKind::Command("Quit".to_string(), EntryId::Quit));
+        }else {
+            entries.push(EntryKind::Command("Quit to Xochitl".to_string(), EntryId::QuitToXochitl));
         }
-
 
         if CURRENT_DEVICE.has_page_turn_buttons() {
             let button_scheme = context.settings.button_scheme;

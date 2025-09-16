@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 set -e
 
@@ -68,4 +68,5 @@ cd mupdf_wrapper
 ./build-kobo.sh
 cd ..
 
-cargo build --release --target=armv7-unknown-linux-gnueabihf -p plato
+#cargo build --release --target=armv7-unknown-linux-gnueabihf -p plato
+cross build --release --target=armv7-unknown-linux-gnueabihf -p plato

@@ -1,4 +1,4 @@
-#! /bin/sh
+#!/bin/sh
 
 if ! [ -e Settings.toml ]; then
 	cat <<- EOF > Settings.toml

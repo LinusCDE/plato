@@ -5,6 +5,10 @@ use crate::input::TouchProto;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Model {
+    LibraColour,
+    ClaraColour,
+    ClaraBW,
+    Elipsa2E,
     Clara2E,
     Libra2,
     Sage,
@@ -41,6 +45,10 @@ pub enum Orientation {
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
+            Model::LibraColour   => write!(f, "Kobo Libra Colour"),
+            Model::ClaraColour   => write!(f, "Kobo Clara Colour"),
+            Model::ClaraBW       => write!(f, "Kobo Clara BW"),
+            Model::Elipsa2E      => write!(f, "Kobo Elipsa 2E"),
             Model::Clara2E       => write!(f, "Kobo Clara 2E"),
             Model::Libra2        => write!(f, "Kobo Libra 2"),
             Model::Sage          => write!(f, "Kobo Sage"),
@@ -203,29 +211,63 @@ impl Device {
                 dims: (1072, 1448),
                 dpi: 300,
             },
+            "condor" => Device {
+                model: Model::Elipsa2E,
+                proto: TouchProto::MultiC,
+                dims: (1404, 1872),
+                dpi: 227,
+            },
+            "spaBW" => Device {
+                model: Model::ClaraBW,
+                proto: TouchProto::MultiB,
+                dims: (1072, 1448),
+                dpi: 300,
+            },
+            "spaColour" => Device {
+                model: Model::ClaraColour,
+                proto: TouchProto::MultiB,
+                dims: (1072, 1448),
+                dpi: 300,
+            },
+            "monza" => Device {
+                model: Model::LibraColour,
+                proto: TouchProto::MultiB,
+                dims: (1264, 1680),
+                dpi: 300,
+            },
             _ => Device {
                 model: if model_number == "320" { Model::TouchC } else { Model::TouchAB },
-                proto: TouchProto::MultiA,
+                proto: TouchProto::Single,
                 dims: (600, 800),
                 dpi: 167,
             },
         }
     }
 
+    pub fn color_samples(&self) -> usize {
+        match self.model {
+            Model::ClaraColour | Model::LibraColour => 3,
+            _ => 1,
+        }
+    }
+
     pub fn frontlight_kind(&self) -> FrontlightKind {
         match self.model {
-            Model::AuraONE |
-            Model::AuraONELimEd |
-            Model::AuraH2OEd2V1 |
-            Model::AuraH2OEd2V2 => FrontlightKind::Natural,
             Model::ClaraHD |
             Model::Forma |
             Model::Forma32GB |
             Model::LibraH2O |
             Model::Sage |
             Model::Libra2 |
-            Model::Libra2 |
-            Model::Clara2E => FrontlightKind::Premixed,
+            Model::Clara2E |
+            Model::Elipsa2E |
+            Model::ClaraBW |
+            Model::ClaraColour |
+            Model::LibraColour => FrontlightKind::Premixed,
+            Model::AuraONE |
+            Model::AuraONELimEd |
+            Model::AuraH2OEd2V1 |
+            Model::AuraH2OEd2V2 => FrontlightKind::Natural,
             Model::Remarkable => FrontlightKind::Fake,
             _ => FrontlightKind::Standard,
         }
@@ -242,8 +284,8 @@ impl Device {
 
     pub fn has_gyroscope(&self) -> bool {
         matches!(self.model,
-                 Model::Forma | Model::Forma32GB | Model::LibraH2O |
-                 Model::Elipsa | Model::Sage | Model::Libra2)
+                 Model::Forma | Model::Forma32GB | Model::LibraH2O | Model::Elipsa |
+                 Model::Sage | Model::Libra2 | Model::Elipsa2E | Model::LibraColour)
     }
 
     pub fn has_page_turn_buttons(&self) -> bool {
@@ -253,7 +295,7 @@ impl Device {
 
         matches!(self.model,
                  Model::Forma | Model::Forma32GB | Model::LibraH2O |
-                 Model::Sage | Model::Libra2)
+                 Model::Sage | Model::Libra2 | Model::LibraColour)
     }
 
     pub fn has_power_cover(&self) -> bool {
@@ -287,6 +329,10 @@ impl Device {
     /// libremarkable instead).
     pub fn mark(&self) -> u8 {
         match self.model {
+            Model::LibraColour => 13,
+            Model::ClaraBW |
+            Model::ClaraColour => 12,
+            Model::Elipsa2E => 11,
             Model::Clara2E => 10,
             Model::Libra2 => 9,
             Model::Sage |
@@ -357,7 +403,8 @@ impl Device {
             Model::LibraH2O => 0,
             Model::AuraH2OEd2V1 |
             Model::Forma | Model::Forma32GB |
-            Model::Sage | Model::Libra2 => 1,
+            Model::Sage | Model::Libra2 | Model::Elipsa2E |
+            Model::LibraColour => 1,
             Model::Remarkable => 1,
             _ => 3,
         }
@@ -392,7 +439,9 @@ impl Device {
         match self.model {
             Model::LibraH2O => n ^ 1,
             Model::Libra2 |
-            Model::Sage => (6 - n) % 4,
+            Model::Sage |
+            Model::Elipsa2E |
+            Model::LibraColour => (6 - n) % 4,
             Model::Elipsa => (4 - n) % 4,
             _ => n,
         }

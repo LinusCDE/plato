@@ -7,9 +7,8 @@ use std::io::{Error as IoError, ErrorKind};
 use walkdir::WalkDir;
 use indexmap::IndexMap;
 use fxhash::{FxHashMap, FxHashSet, FxBuildHasher};
-use chrono::{Local, TimeZone};
-use filetime::{FileTime, set_file_mtime, set_file_handle_times};
-use anyhow::{Error, format_err};
+use chrono::{Local, DateTime};
+use anyhow::{Error, bail, format_err};
 use crate::metadata::{Info, ReaderInfo, FileInfo, BookQuery, SimpleStatus, SortMethod};
 use crate::metadata::{sort, sorter, extract_metadata_from_document};
 use crate::settings::{LibraryMode, ImportSettings};
@@ -36,35 +35,41 @@ pub struct Library {
 }
 
 impl Library {
-    pub fn new<P: AsRef<Path>>(home: P, mode: LibraryMode) -> Self {
-        if !home.as_ref().exists() {
-            fs::create_dir_all(&home).ok();
+    pub fn new<P: AsRef<Path>>(home: P, mode: LibraryMode) -> Result<Self, Error> {
+        if let Err(e) = fs::create_dir(&home) {
+            if e.kind() != ErrorKind::AlreadyExists {
+                bail!(e);
+            }
         }
 
-        let mut db: IndexMap<Fp, Info, FxBuildHasher> = if mode == LibraryMode::Database {
-            let path = home.as_ref().join(METADATA_FILENAME);
-            match load_json(&path) {
+        let path = home.as_ref().join(METADATA_FILENAME);
+        let mut db;
+        if mode == LibraryMode::Database {
+            match load_json::<IndexMap<Fp, Info, FxBuildHasher>, _>(&path) {
                 Err(e) => {
                     if e.downcast_ref::<IoError>().map(|e| e.kind()) != Some(ErrorKind::NotFound) {
-                        eprintln!("Can't load database: {:#}.", e);
+                        bail!(e);
+                    } else {
+                        db = IndexMap::with_capacity_and_hasher(0, FxBuildHasher::default());
                     }
-                    IndexMap::with_capacity_and_hasher(0, FxBuildHasher::default())
                 },
-                Ok(v) => v,
+                Ok(v) => db = v,
             }
         } else {
-            IndexMap::with_capacity_and_hasher(0, FxBuildHasher::default())
-        };
+            db = IndexMap::with_capacity_and_hasher(0, FxBuildHasher::default());
+        }
 
         let mut reading_states = FxHashMap::default();
 
         let path = home.as_ref().join(READING_STATES_DIRNAME);
-        if !path.exists() {
-            fs::create_dir(&path).ok();
+        if let Err(e) = fs::create_dir(&path) {
+            if e.kind() != ErrorKind::AlreadyExists {
+                bail!(e);
+            }
         }
 
-        for entry in fs::read_dir(&path).expect(&format!("Failed to read directory \"{:?}\"", &path)) {
-            let entry = entry.unwrap();
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
             let path = entry.path();
             if let Some(fp) = path.file_stem().and_then(|v| v.to_str())
                                   .and_then(|v| Fp::from_str(v).ok()) {
@@ -95,17 +100,15 @@ impl Library {
 
         let path = home.as_ref().join(FAT32_EPOCH_FILENAME);
         if !path.exists() {
-            let file = File::create(&path).unwrap();
-            let mtime = FileTime::from_unix_time(315_532_800, 0);
-            set_file_handle_times(&file, None, Some(mtime))
-                    .map_err(|e| eprintln!("Can't set file times: {:#}.", e)).ok();
+            let file = File::create(&path)?;
+            file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(315_532_800))?;
         }
 
-        let fat32_epoch = path.metadata().unwrap().modified().unwrap();
+        let fat32_epoch = path.metadata()?.modified()?;
 
         let sort_method = SortMethod::Opened;
 
-        Library {
+        Ok(Library {
             home: home.as_ref().to_path_buf(),
             mode,
             db,
@@ -117,7 +120,7 @@ impl Library {
             sort_method,
             reverse_order: sort_method.reverse_order(),
             show_hidden: false,
-        }
+        })
     }
 
     pub fn list<P: AsRef<Path>>(&self, prefix: P, query: Option<&BookQuery>, skip_files: bool) -> (Vec<Info>, BTreeSet<PathBuf>) {
@@ -194,7 +197,7 @@ impl Library {
                         };
                         let secs = (*fp >> 32) as i64;
                         let nsecs = ((*fp & ((1<<32) - 1)) % 1_000_000_000) as u32;
-                        let added = Local.timestamp_opt(secs, nsecs).single().unwrap();
+                        let added = DateTime::from_timestamp(secs, nsecs).unwrap().naive_utc();
                         let info = Info {
                             file,
                             added,
@@ -248,7 +251,10 @@ impl Library {
             // The path is known: update the fp.
             } else if let Some(fp2) = self.paths.get(relat).cloned() {
                 println!("Update fingerprint for {}: {} → {}.", relat.display(), fp2, fp);
-                let info = self.db.remove(&fp2).unwrap();
+                let mut info = self.db.swap_remove(&fp2).unwrap();
+                if settings.sync_metadata && settings.metadata_kinds.contains(&info.file.kind) {
+                    extract_metadata_from_document(&self.home, &mut info);
+                }
                 self.db.insert(fp, info);
                 self.db[&fp].file.size = md.len();
                 self.paths.insert(relat.to_path_buf(), fp);
@@ -280,7 +286,7 @@ impl Library {
                 // and moved within another.
                 if let Some(nfp) = nfp {
                     println!("Update fingerprint for {}: {} → {}.", self.db[&nfp].file.path.display(), nfp, fp);
-                    let info = self.db.remove(&nfp).unwrap();
+                    let info = self.db.swap_remove(&nfp).unwrap();
                     self.db.insert(fp, info);
                     let rp1 = self.reading_state_path(nfp);
                     let rp2 = self.reading_state_path(fp);
@@ -362,17 +368,23 @@ impl Library {
     }
 
     pub fn add_document(&mut self, info: Info) {
-        if self.mode == LibraryMode::Filesystem {
-            return;
-        }
-
         let path = self.home.join(&info.file.path);
         let md = path.metadata().unwrap();
         let fp = md.fingerprint(self.fat32_epoch).unwrap();
 
-        self.paths.insert(info.file.path.clone(), fp);
-        self.db.insert(fp, info);
-        self.has_db_changed = true;
+        if info.reader.is_some() {
+            self.modified_reading_states.insert(fp);
+        }
+
+        if self.mode == LibraryMode::Database {
+            self.paths.insert(info.file.path.clone(), fp);
+            self.db.insert(fp, info);
+            self.has_db_changed = true;
+        } else {
+            if let Some(reader_info) = info.reader {
+                self.reading_states.insert(fp, reader_info);
+            }
+        }
     }
 
     pub fn rename<P: AsRef<Path>>(&mut self, path: P, file_name: &str) -> Result<(), Error> {
@@ -467,8 +479,10 @@ impl Library {
         }
 
         fs::copy(&src, &dest)?;
-        let mtime = FileTime::from_last_modification_time(&md);
-        set_file_mtime(&dest, mtime)?;
+        {
+            let fdest = File::open(&dest)?;
+            fdest.set_modified(md.modified()?)?;
+        }
 
         let rsp_src = self.reading_state_path(fp);
         if rsp_src.exists() {

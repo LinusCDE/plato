@@ -84,7 +84,7 @@ impl TopBar {
         title_label.update(title, rq);
     }
 
-    pub fn update_frontlight_icon(&mut self, rq: &mut RenderQueue, context: &mut Context) {
+    pub fn update_frontlight_icon(&mut self, _rq: &mut RenderQueue, _context: &mut Context) {
         /*let name = if context.settings.frontlight { "frontlight" } else { "frontlight-disabled" };
         let icon = self.child_mut(4).downcast_mut::<Icon>().unwrap();
         icon.name = name.to_string();

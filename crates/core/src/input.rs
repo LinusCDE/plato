@@ -126,6 +126,7 @@ pub struct InputEvent {
 }
 
 // Handle different touch protocols
+#[allow(unused)]
 #[derive(Debug)]
 pub struct TouchCodes {
     pressure: u16,
@@ -318,7 +319,7 @@ pub fn parse_raw_events(
 
         loop {
             let mut any_changed = false;
-            for command in filter_cmd_rx.try_recv() {
+            while let Ok(command) = filter_cmd_rx.try_recv() {
                 let changed = if command.filtered {
                     // Add to filterlist
                     filtered_devices.insert(command.path.clone())
@@ -536,7 +537,7 @@ pub fn parse_device_events(
     const PEN_SLOT: i32 = 100; // Figer id for wacom pen
     let mut last_activity = -60;
     let Display {
-        mut dims,
+        dims: _dims,
         mut rotation,
     } = display;
 
@@ -624,7 +625,7 @@ pub fn parse_device_events(
 
             if evt.code == SYN_REPORT {
                 // Send new positions
-                for (slot, mut finger) in ev_fingers.iter_mut() {
+                for (slot, finger) in ev_fingers.iter_mut() {
                     if !finger.last_pressed && finger.pressed {
                         // Pressed
                         finger.last_pressed = finger.pressed;
@@ -680,7 +681,7 @@ pub fn parse_device_events(
             } else if evt.code == KEY_ROTATE_DISPLAY {
                 let next_rotation = evt.value as i8;
                 if next_rotation != rotation {
-                    let delta = (rotation - next_rotation).abs();
+                    //let delta = (rotation - next_rotation).abs();
                     //if delta % 2 == 1 {
                     //    mem::swap(&mut tc.x, &mut tc.y);
                     //    mem::swap(&mut dims.0, &mut dims.1);

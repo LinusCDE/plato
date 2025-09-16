@@ -1,4 +1,4 @@
-use std::fs::{self, File};
+use std::fs::File;
 use std::env;
 use std::thread;
 use std::process::Command;
@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use plato_core::anyhow::{Error, Context as ResultExt, format_err};
 use plato_core::chrono::Local;
-use plato_core::framebuffer::{Framebuffer, KoboFramebuffer1, KoboFramebuffer2, RemarkableFramebuffer, UpdateMode};
+use plato_core::framebuffer::{Framebuffer, RemarkableFramebuffer, UpdateMode};
 use plato_core::view::{View, Event, EntryId, EntryKind, ViewId, AppCmd, RenderData, RenderQueue, UpdateData};
 use plato_core::view::{handle_event, process_render_queue, wait_for_all};
 use plato_core::view::common::{locate, locate_by_id, transfer_notifications, overlapping_rectangle};
@@ -28,7 +28,7 @@ use plato_core::helpers::{load_toml, save_toml};
 use plato_core::settings::{ButtonScheme, Settings, SETTINGS_PATH, RotationLock, IntermKind, InputSource};
 use plato_core::frontlight::{Frontlight, StandardFrontlight, NaturalFrontlight, PremixedFrontlight, FakeFrontlight};
 use plato_core::lightsensor::{LightSensor, KoboLightSensor};
-use plato_core::battery::{Battery, KoboBattery, RemarkableBattery};
+use plato_core::battery::{Battery, RemarkableBattery};
 use plato_core::geom::{Rectangle, DiagDir, Region};
 use plato_core::view::home::Home;
 use plato_core::view::reader::Reader;
@@ -42,7 +42,6 @@ use plato_core::rtc::Rtc;
 use plato_core::context::Context;
 
 pub const APP_NAME: &str = "Plato";
-const FB_DEVICE: &str = "/dev/fb0";
 const RTC_DEVICE: &str = "/dev/rtc0";
 
 const KOBO_UPDATE_BUNDLE: &str = "/mnt/onboard/.kobo/KoboRoot.tgz";
@@ -53,12 +52,14 @@ const AUTO_SUSPEND_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const SUSPEND_WAIT_DELAY: Duration = Duration::from_secs(15);
 const PREPARE_SUSPEND_WAIT_DELAY: Duration = Duration::from_secs(3);
 
+#[allow(unused)]
 struct Task {
     id: TaskId,
     chan: Receiver<()>,
 }
 
 impl Task {
+    #[allow(unused)]
     fn has_occurred(&self) -> bool {
         self.chan.try_recv() == Ok(())
     }

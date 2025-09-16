@@ -205,7 +205,7 @@ impl Framebuffer for Pixmap {
         RefreshQuality::Normal
     }
 
-    fn set_refresh_quality(&mut self, quality: RefreshQuality) {
+    fn set_refresh_quality(&mut self, _quality: RefreshQuality) {
     }
 
     fn dims(&self) -> (u32, u32) {

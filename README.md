@@ -43,6 +43,12 @@ The reMarkable 2 is supported as well. Some features were initially added with t
 
 Otherwise everything should work fine.
 
+## Environment variables for this port
+
+ - `PLATO_DISABLE_BUILTIN_SWTFB_CLIENT=1`: Legacy. Now just sets `LIBREMARKABLE_FB_DISFAVOR_INTERNAL_RM2FB=1`
+ - `LIBREMARKABLE_FB_DISFAVOR_INTERNAL_RM2FB=1`: On the reMarkable 2, [RM2FB](https://github.com/ddvk/remarkable2-framebuffer/) will be used directly by default (removing the need to invoke the shim). This behavior can be unwanted sometimes and is disabled by this env being set. It results in this application treating the framebuffer like a reMarkable 1 one (expecting a shim e.g. by setting `LD_PRELOAD` or running through `rm2fb-client`. Otherwise crashes).
+ - `PLATO_ALLOW_HW_ROTATION=1`: Allows the rM 1 to use hardware rotation instead of software one. Hardware roation can be faster, but causes issues with launchers that never expect the framebuffer to be hw rotated before taking over. Used to be enabled default in prior versions of this plato port.
+
 ## Supported firmwares
 
 Any 4.*X*.*Y* firmware, with *X* ≥ 6, will do.

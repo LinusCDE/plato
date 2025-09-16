@@ -325,8 +325,7 @@ pub fn run() -> Result<(), Error> {
     let mut updating = Vec::new();
     let current_dir = env::current_dir()?;
 
-    println!("{} is running on a Kobo {}.", APP_NAME,
-                                            CURRENT_DEVICE.model);
+    println!("{} is running on a {}.", APP_NAME, CURRENT_DEVICE.model);
     println!("The framebuffer resolution is {} by {}.", context.fb.rect().width(),
                                                         context.fb.rect().height());
 

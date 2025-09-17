@@ -380,6 +380,7 @@ impl Framebuffer for RemarkableFramebuffer {
     fn set_rotation(&mut self, n: i8) -> Result<(u32, u32), Error> {
         if self.rotation_in_software.is_some() {
             self.rotation_in_software = Some(SwRotation::try_from(n)?);
+            println!("Changed Framebuffer-Rotation (SW-Based) to {n}");
             return Ok((self.width(), self.height()));
         }
 
@@ -398,6 +399,7 @@ impl Framebuffer for RemarkableFramebuffer {
                 .expect("Unable to map provided path");
             self.fb.frame = mem_map;
         }
+        println!("Changed Framebuffer-Rotation (HW-Based) to {n}");
 
         Ok((self.width(), self.height())) // With and height have already updated
     }

@@ -193,7 +193,7 @@ pub fn render(view: &dyn View, wait: bool, ids: &FxHashMap<Id, Vec<Rectangle>>, 
                 updating.retain(|update| {
                     let overlaps = render_rect.overlaps(&update.rect);
                     if overlaps && !update.has_completed() {
-                        fb.wait(update.token)
+                        timed!("fb wait", fb.wait(update.token))
                           .map_err(|e| eprintln!("Can't wait for {}, {}: {:#}",
                                                  update.token, update.rect, e))
                           .ok();
@@ -264,11 +264,12 @@ pub fn process_render_queue(view: &dyn View, rq: &mut RenderQueue, context: &mut
             }
         }
 
-        render(view, wait, &ids, &mut rects, &mut bgs,
-               context.fb.as_mut(), &mut context.fonts, updating);
+        timed!(format!("render {:?}", mode),
+               render(view, wait, &ids, &mut rects, &mut bgs,
+                      context.fb.as_mut(), &mut context.fonts, updating));
 
         for rect in rects {
-            match context.fb.update(&rect, mode) {
+            match timed!(format!("fb update {:?} {}", mode, rect), context.fb.update(&rect, mode)) {
                 Ok(token) => { updating.push(UpdateData { token, rect, time: Instant::now()}); },
                 Err(err) => { eprintln!("Can't update {}: {:#}.", rect, err); },
             }

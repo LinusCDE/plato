@@ -1,4 +1,5 @@
 #[macro_use] pub mod geom;
+#[macro_use] pub mod helpers;
 
 mod unit;
 pub mod color;
@@ -8,7 +9,6 @@ pub mod frontlight;
 pub mod lightsensor;
 pub mod battery;
 pub mod input;
-pub mod helpers;
 mod dictionary;
 pub mod document;
 pub mod library;

@@ -17,6 +17,25 @@ use walkdir::DirEntry;
 use anyhow::{Error, Context};
 
 lazy_static! {
+    // Set PLATO_TIMING=1 to print how long the expensive steps take.
+    pub static ref TIMING: bool = std::env::var_os("PLATO_TIMING").is_some_and(|v| v != "0");
+}
+
+#[macro_export]
+macro_rules! timed {
+    ($label:expr, $e:expr) => {{
+        if *$crate::helpers::TIMING {
+            let start = std::time::Instant::now();
+            let result = $e;
+            eprintln!("[timing] {}: {:.1} ms", $label, start.elapsed().as_secs_f64() * 1000.0);
+            result
+        } else {
+            $e
+        }
+    }};
+}
+
+lazy_static! {
     pub static ref CHARACTER_ENTITIES: FxHashMap<&'static str, &'static str> = {
         let mut m = FxHashMap::default();
         for e in ENTITIES.iter() {

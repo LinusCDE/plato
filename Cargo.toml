@@ -8,6 +8,12 @@ members = [
   "crates/fetcher",
 ]
 
+[profile.release]
+# Whole-program optimization: inlines across crates (libremarkable, image
+# code) and lets the pixel loops vectorize.
+lto = "fat"
+codegen-units = 1
+
 [profile.release-minsized]
 inherits = "release"
 panic = "abort"

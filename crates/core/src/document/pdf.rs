@@ -1,6 +1,7 @@
 use super::mupdf_sys::*;
 
 use std::fs;
+use lazy_static::lazy_static;
 use std::ptr;
 use std::slice;
 use std::char;
@@ -17,6 +18,36 @@ use crate::unit::pt_to_px;
 use crate::framebuffer::Pixmap;
 
 const USER_STYLESHEET: &str = "css/html-user.css";
+
+lazy_static! {
+    static ref PARALLEL_RENDER: bool = std::env::var("PLATO_PARALLEL_RENDER").map_or(true, |v| v != "0");
+}
+
+// MuPDF keeps some process-wide state (e.g. the OpenJPEG context in
+// load-jpx.c) that is only guarded by these locks. Every context we create
+// must share them, otherwise rendering in two threads at once (reader and
+// thumbnail generation) corrupts memory and segfaults.
+struct MupdfMutexes([std::cell::UnsafeCell<libc::pthread_mutex_t>; FZ_LOCK_MAX]);
+
+unsafe impl Sync for MupdfMutexes {}
+
+static MUPDF_MUTEXES: MupdfMutexes = MupdfMutexes(
+    [const { std::cell::UnsafeCell::new(libc::PTHREAD_MUTEX_INITIALIZER) }; FZ_LOCK_MAX]
+);
+
+extern "C" fn mupdf_lock(_user: *mut libc::c_void, lock: libc::c_int) {
+    unsafe { libc::pthread_mutex_lock(MUPDF_MUTEXES.0[lock as usize].get()); }
+}
+
+extern "C" fn mupdf_unlock(_user: *mut libc::c_void, lock: libc::c_int) {
+    unsafe { libc::pthread_mutex_unlock(MUPDF_MUTEXES.0[lock as usize].get()); }
+}
+
+static MUPDF_LOCKS: FzLocksContext = FzLocksContext {
+    user: ptr::null_mut(),
+    lock: mupdf_lock,
+    unlock: mupdf_unlock,
+};
 
 impl Into<Boundary> for FzRect {
     fn into(self) -> Boundary {
@@ -47,7 +78,7 @@ impl PdfOpener {
     pub fn new() -> Option<PdfOpener> {
         unsafe {
             let version = CString::new(FZ_VERSION).unwrap();
-            let ctx = fz_new_context_imp(ptr::null(), ptr::null(), CACHE_SIZE, version.as_ptr());
+            let ctx = fz_new_context_imp(ptr::null(), &MUPDF_LOCKS, CACHE_SIZE, version.as_ptr());
 
             if ctx.is_null() {
                 None
@@ -475,11 +506,9 @@ impl<'a> PdfPage<'a> {
             } else {
                 fz_device_rgb(self.ctx.0)
             };
-            let pixmap = mp_new_pixmap_from_page(self.ctx.0,
-                                                 self.page,
-                                                 mat,
-                                                 color_space,
-                                                 0);
+            // Draw the page on both cores, unless PLATO_PARALLEL_RENDER=0.
+            let render = if *PARALLEL_RENDER { mp_new_pixmap_from_page_parallel } else { mp_new_pixmap_from_page };
+            let pixmap = render(self.ctx.0, self.page, mat, color_space, 0);
             if pixmap.is_null() {
                 return None;
             }

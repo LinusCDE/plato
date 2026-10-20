@@ -1,6 +1,7 @@
 use std::thread;
 use std::sync::Mutex;
 use std::path::PathBuf;
+use fxhash::FxHashSet;
 use lazy_static::lazy_static;
 use super::book::Book;
 use crate::device::CURRENT_DEVICE;
@@ -21,6 +22,8 @@ use crate::context::Context;
 
 lazy_static! {
     static ref EXCLUSIVE_ACCESS: Mutex<u8> = Mutex::new(0);
+    // Previews being generated, so redraws don't start the same work again.
+    static ref PENDING_PREVIEWS: Mutex<FxHashSet<PathBuf>> = Mutex::new(FxHashSet::default());
 }
 
 pub struct Shelf {
@@ -81,22 +84,30 @@ impl Shelf {
             let preview_path: Option<PathBuf> = if self.thumbnail_previews {
                 let thumb_path = context.library.thumbnail_preview(&info.file.path);
                 if !thumb_path.exists() {
-                    let hub2 = hub.clone();
-                    let thumb_path2 = thumb_path.to_string_lossy().into_owned();
-                    let path = info.file.path.clone();
-                    let full_path = context.library.home.join(&info.file.path);
-                    thread::spawn(move || {
-                        // This is a hack to circumvent a segfault (EXC_BAD_ACCESS)
-                        // triggered by loading multiple jp2 pixmaps in parallel.
-                        let _guard = EXCLUSIVE_ACCESS.lock().unwrap();
-                        open(full_path).and_then(|mut doc| {
-                            doc.preview_pixmap(tw as f32, th as f32, CURRENT_DEVICE.color_samples())
-                        }).map(|pixmap| {
-                            if pixmap.save(&thumb_path2).is_ok() {
-                                hub2.send(Event::RefreshBookPreview(path, Some(PathBuf::from(thumb_path2)))).ok();
+                    if PENDING_PREVIEWS.lock().unwrap().insert(thumb_path.clone()) {
+                        let hub2 = hub.clone();
+                        let thumb_path2 = thumb_path.clone();
+                        let path = info.file.path.clone();
+                        let full_path = context.library.home.join(&info.file.path);
+                        thread::spawn(move || {
+                            // Previews matter less than whatever the user is doing.
+                            unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10); }
+                            // One preview at a time keeps memory and CPU use bounded.
+                            let _guard = EXCLUSIVE_ACCESS.lock().unwrap();
+                            let tmp_path = thumb_path2.with_extension("png.tmp");
+                            let saved = open(full_path).and_then(|mut doc| {
+                                doc.preview_pixmap(tw as f32, th as f32, CURRENT_DEVICE.color_samples())
+                            }).is_some_and(|pixmap| {
+                                // Write then rename, so a half-written file never counts as done.
+                                pixmap.save(&tmp_path.to_string_lossy()).is_ok() &&
+                                std::fs::rename(&tmp_path, &thumb_path2).is_ok()
+                            });
+                            PENDING_PREVIEWS.lock().unwrap().remove(&thumb_path2);
+                            if saved {
+                                hub2.send(Event::RefreshBookPreview(path, Some(thumb_path2))).ok();
                             }
-                        })
-                    });
+                        });
+                    }
                     Some(PathBuf::default())
                 } else {
                     Some(thumb_path)

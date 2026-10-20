@@ -103,7 +103,7 @@ impl Default for Annotation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Margin {
     pub top: f32,
     pub right: f32,

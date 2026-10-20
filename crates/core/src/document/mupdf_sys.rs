@@ -30,7 +30,19 @@ pub enum FzDevice {}
 pub enum FzFont {}
 pub enum FzColorspace {}
 pub enum FzAllocContext {}
-pub enum FzLocksContext {}
+
+// FZ_LOCK_ALLOC, FZ_LOCK_FREETYPE, FZ_LOCK_GLYPHCACHE.
+pub const FZ_LOCK_MAX: usize = 3;
+
+#[repr(C)]
+pub struct FzLocksContext {
+    pub user: *mut libc::c_void,
+    pub lock: extern "C" fn(user: *mut libc::c_void, lock: libc::c_int),
+    pub unlock: extern "C" fn(user: *mut libc::c_void, lock: libc::c_int),
+}
+
+// Only holds function pointers and a null user pointer.
+unsafe impl Sync for FzLocksContext {}
 pub enum FzCookie {}
 pub enum FzStoreDropFn {}
 pub enum FzLinkSetRectFn {}
@@ -65,6 +77,7 @@ extern "C" {
     pub fn fz_device_gray(ctx: *mut FzContext) -> *mut FzColorspace;
     pub fn fz_scale(sx: libc::c_float, sy: libc::c_float) -> FzMatrix;
     pub fn mp_new_pixmap_from_page(ctx: *mut FzContext, page: *mut FzPage, mat: FzMatrix, cs: *mut FzColorspace, alpha: libc::c_int) -> *mut FzPixmap;
+    pub fn mp_new_pixmap_from_page_parallel(ctx: *mut FzContext, page: *mut FzPage, mat: FzMatrix, cs: *mut FzColorspace, alpha: libc::c_int) -> *mut FzPixmap;
     pub fn fz_set_pixmap_resolution(ctx: *mut FzContext, pix: *mut FzPixmap, xres: libc::c_int, yres: libc::c_int);
     pub fn fz_drop_pixmap(ctx: *mut FzContext, pixmap: *mut FzPixmap);
     pub fn mp_load_page(ctx: *mut FzContext, doc: *mut FzDocument, page_idx: libc::c_int) -> *mut FzPage;

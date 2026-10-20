@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use plato_core::anyhow::{Error, Context as ResultExt, format_err};
 use plato_core::chrono::Local;
-use plato_core::framebuffer::{Framebuffer, RemarkableFramebuffer, UpdateMode};
+use plato_core::framebuffer::{Framebuffer, QtfbFramebuffer, RemarkableFramebuffer, UpdateMode};
 use plato_core::view::{View, Event, EntryId, EntryKind, ViewId, AppCmd, RenderData, RenderQueue, UpdateData};
 use plato_core::view::{handle_event, process_render_queue, wait_for_all};
 use plato_core::view::common::{locate, locate_by_id, transfer_notifications, overlapping_rectangle};
@@ -35,7 +35,7 @@ use plato_core::view::reader::Reader;
 use plato_core::view::dialog::Dialog;
 use plato_core::view::intermission::Intermission;
 use plato_core::view::notification::Notification;
-use plato_core::device::{CURRENT_DEVICE, Orientation, FrontlightKind};
+use plato_core::device::{CURRENT_DEVICE, Model, Orientation, FrontlightKind};
 use plato_core::library::Library;
 use plato_core::font::Fonts;
 use plato_core::rtc::Rtc;
@@ -51,6 +51,12 @@ const BATTERY_REFRESH_INTERVAL: Duration = Duration::from_secs(299);
 const AUTO_SUSPEND_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const SUSPEND_WAIT_DELAY: Duration = Duration::from_secs(15);
 const PREPARE_SUSPEND_WAIT_DELAY: Duration = Duration::from_secs(3);
+// Gestures made while handling an event took longer than this are dropped.
+const STALE_INPUT_THRESHOLD: Duration = Duration::from_millis(250);
+// After an update covering most of the screen (a page turn), gestures are
+// ignored for this long: the e-ink panel needs it to show the new content.
+// PLATO_INPUT_COOLDOWN_MS overrides it.
+const INPUT_COOLDOWN: Duration = Duration::from_millis(500);
 
 #[allow(unused)]
 struct Task {
@@ -213,7 +219,14 @@ pub fn run() -> Result<(), Error> {
         }
     }
 
-    let mut fb = Box::new(RemarkableFramebuffer::new().context("can't create framebuffer")?);
+    // Under AppLoad, draw straight into its qtfb buffer (PLATO_QTFB=0 opts out).
+    let use_qtfb = env::var_os("QTFB_KEY").is_some() &&
+                   env::var("PLATO_QTFB").map_or(true, |v| v != "0");
+    let mut fb: Box<dyn Framebuffer> = if use_qtfb {
+        Box::new(QtfbFramebuffer::new().context("can't connect to qtfb")?)
+    } else {
+        Box::new(RemarkableFramebuffer::new().context("can't create framebuffer")?)
+    };
     let initial_rotation = CURRENT_DEVICE.transformed_rotation(fb.rotation());
     let startup_rotation = CURRENT_DEVICE.startup_rotation();
     if !CURRENT_DEVICE.has_gyroscope() && initial_rotation != startup_rotation {
@@ -302,10 +315,14 @@ pub fn run() -> Result<(), Error> {
 
     context.fb.set_inverted(context.settings.inverted);
 
-    if context.settings.wifi {
-        Command::new("scripts/wifi-enable.sh").status().ok();
-    } else {
-        Command::new("scripts/wifi-disable.sh").status().ok();
+    // The Wi-Fi scripts are written for Kobo hardware; on a reMarkable they
+    // only cost process launches and a sleep, and xochitl owns Wi-Fi anyway.
+    if CURRENT_DEVICE.model != Model::Remarkable {
+        if context.settings.wifi {
+            Command::new("scripts/wifi-enable.sh").status().ok();
+        } else {
+            Command::new("scripts/wifi-disable.sh").status().ok();
+        }
     }
 
     if context.settings.frontlight {
@@ -336,7 +353,27 @@ pub fn run() -> Result<(), Error> {
                   BATTERY_REFRESH_INTERVAL, &tx, &mut tasks);
     tx.send(Event::WakeUp).ok();
 
-    while let Ok(evt) = rx.recv() {
+    // Events taken off the channel while dropping stale gestures.
+    let mut pending: VecDeque<Event> = VecDeque::new();
+
+    // Until when the panel is still showing a large update (a new page).
+    let mut screen_settling_until: Option<Instant> = None;
+    let input_cooldown = env::var("PLATO_INPUT_COOLDOWN_MS").ok()
+                             .and_then(|v| v.parse::<u64>().ok())
+                             .map_or(INPUT_COOLDOWN, Duration::from_millis);
+
+    while let Some(evt) = pending.pop_front().or_else(|| rx.recv().ok()) {
+        let handling_started = Instant::now();
+
+        // A tap made before the new page is actually visible on the panel
+        // was aimed at the old page: repeated taps would skip pages.
+        if matches!(evt, Event::Gesture(_)) && screen_settling_until.is_some_and(|t| handling_started < t) {
+            if *plato_core::helpers::TIMING {
+                eprintln!("[timing] ignored {:?} while the screen settles", evt);
+            }
+            continue;
+        }
+
         match evt {
             Event::Device(de) => {
                 match de {
@@ -1059,8 +1096,31 @@ pub fn run() -> Result<(), Error> {
 
         process_render_queue(view.as_ref(), &mut rq, &mut context, &mut updating);
 
+        let screen_area = context.fb.rect().area();
+        if updating.iter().any(|u| u.time >= handling_started && 2 * u.rect.area() >= screen_area) {
+            screen_settling_until = Some(Instant::now() + input_cooldown);
+        }
+
         while let Some(ce) = bus.pop_front() {
             tx.send(ce).ok();
+        }
+
+        // Taps and swipes made while the screen was still catching up (a
+        // page that wasn't rendered yet, a book being opened) would act on a
+        // screen the user hasn't seen yet, e.g. turning two pages at once.
+        if handling_started.elapsed() >= STALE_INPUT_THRESHOLD {
+            let mut dropped = 0;
+            while let Ok(evt) = rx.try_recv() {
+                if matches!(evt, Event::Gesture(_)) {
+                    dropped += 1;
+                } else {
+                    pending.push_back(evt);
+                }
+            }
+            if dropped > 0 && *plato_core::helpers::TIMING {
+                eprintln!("[timing] dropped {} gesture(s) made during a {:.0} ms update",
+                          dropped, handling_started.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
 

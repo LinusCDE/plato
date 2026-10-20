@@ -7,6 +7,7 @@ mod transform;
 mod kobo1;
 mod kobo2;
 mod remarkable;
+mod qtfb;
 
 use anyhow::Error;
 use crate::geom::{Point, Rectangle, surface_area, nearest_segment_point, lerp};
@@ -16,6 +17,7 @@ use crate::color::{Color, BLACK, WHITE};
 pub use self::kobo1::KoboFramebuffer1;
 pub use self::kobo2::KoboFramebuffer2;
 pub use self::remarkable::RemarkableFramebuffer;
+pub use self::qtfb::QtfbFramebuffer;
 pub use self::image::Pixmap;
 use crate::settings::RefreshQuality;
 

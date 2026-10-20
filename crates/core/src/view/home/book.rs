@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use crate::device::CURRENT_DEVICE;
-use crate::framebuffer::{Framebuffer, UpdateMode};
+use crate::framebuffer::{Framebuffer, UpdateMode, Pixmap};
 use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, THICKNESS_SMALL};
 use crate::font::{MD_TITLE, MD_AUTHOR, MD_YEAR, MD_KIND, MD_SIZE};
 use crate::color::{BLACK, WHITE, READING_PROGRESS};
@@ -124,13 +124,20 @@ impl View for Book {
             let tw = 3 * th / 4;
 
             if preview_path.exists() {
-                if let Some((pixmap, _)) = PdfOpener::new().and_then(|opener| {
-                    opener.open(preview_path)
-                }).and_then(|mut doc| {
-                    doc.dims(0).and_then(|dims| {
-                        let scale = (tw as f32 / dims.0).min(th as f32 / dims.1);
-                        doc.pixmap(Location::Exact(0), scale, CURRENT_DEVICE.color_samples())
-                    })
+                // Previews are saved at the size they're shown at, so a plain
+                // PNG decode usually does; fall back to MuPDF to rescale.
+                let fits = |p: &Pixmap| p.samples == CURRENT_DEVICE.color_samples() &&
+                                        p.width as i32 <= tw && p.height as i32 <= th &&
+                                        (p.width as i32 == tw || p.height as i32 == th);
+                if let Some(pixmap) = Pixmap::from_png(preview_path).ok().filter(fits).or_else(|| {
+                    PdfOpener::new().and_then(|opener| {
+                        opener.open(preview_path)
+                    }).and_then(|mut doc| {
+                        doc.dims(0).and_then(|dims| {
+                            let scale = (tw as f32 / dims.0).min(th as f32 / dims.1);
+                            doc.pixmap(Location::Exact(0), scale, CURRENT_DEVICE.color_samples())
+                        })
+                    }).map(|(pixmap, _)| pixmap)
                 }) {
                     let dx = (tw - pixmap.width as i32) / 2;
                     let dy = (th - pixmap.height as i32) / 2;

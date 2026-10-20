@@ -1,7 +1,7 @@
 [package]
 authors = ["Bastien Dejean <nihilhill@gmail.com>"]
 name = "plato-core"
-version = "0.9.44"
+version = "0.9.50"
 edition = "2021"
 
 [lib]
@@ -20,6 +20,7 @@ titlecase = "3.3.0"
 unicode-normalization = "0.1.24"
 toml = "0.8.19"
 zip = "2.2.1"
+zstd = "0.13.3"
 kl-hyphenate = "0.7.3"
 entities = "1.0.1"
 paragraph-breaker = "0.4.4"
